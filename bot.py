@@ -6,9 +6,10 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from yt_dlp import YoutubeDL
 
-# Логирование ошибок в консоль
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
+# ТВОЙ ТОКЕН ВШИТ СЮДА
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 
 bot = Bot(token=TOKEN)
@@ -27,13 +28,12 @@ COMMON_OPTS = {
 # --- КЛАВИАТУРА ---
 def main_menu():
     builder = ReplyKeyboardBuilder()
-    # Тексты кнопок должны СТРОГО совпадать с обработчиками ниже
     builder.button(text="🎬 Скачать Видео (TT/Insta)")
     builder.button(text="🎵 Музыка (SoundCloud)")
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
-# --- ФУНКЦИИ ---
+# --- ФУНКЦИИ СКАЧИВАНИЯ ---
 def search_sc(query):
     with YoutubeDL(COMMON_OPTS) as ydl:
         res = ydl.extract_info(f"scsearch5:{query}", download=False)
@@ -63,9 +63,9 @@ def sync_download(url, mode):
 
 # --- ОБРАБОТЧИКИ ---
 
-# 1. СТАРТ (Приветствие, которое ты просил)
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    # Тот самый текст приветствия
     welcome_text = (
         f"Здарова, {message.from_user.first_name}! 👋\n\n"
         "Этот бот предназначен для быстрого скачивания песен и видео.\n\n"
@@ -76,39 +76,31 @@ async def cmd_start(message: types.Message):
     )
     await message.answer(welcome_text, reply_markup=main_menu())
 
-# 2. РЕАКЦИЯ НА КНОПКУ ВИДЕО
 @dp.message(F.text == "🎬 Скачать Видео (TT/Insta)")
 async def video_btn_handler(message: types.Message):
     await message.answer("Понял! Присылайте ссылку на ТикТок или Инстаграм, я вам скину видео. 📱")
 
-# 3. РЕАКЦИЯ НА КНОПКУ МУЗЫКИ
 @dp.message(F.text == "🎵 Музыка (SoundCloud)")
 async def music_btn_handler(message: types.Message):
-    await message.answer("Без проблем! Присылайте ссылку на SoundCloud или просто напишите название песни, и я её скачаю. 🎵")
+    await message.answer("Без проблем! Присылайте ссылку на SoundCloud или просто напишите название песни. 🎵")
 
-# 4. ОБРАБОТКА ССЫЛОК И ПОИСКА
 @dp.message(F.text)
 async def handle_message(message: types.Message):
     text = message.text
-
-    # Если это ссылка
     if text.startswith(("http://", "https://")):
         if "soundcloud.com" in text:
             await start_download(message, text, "audio")
         elif any(domain in text for domain in ["tiktok.com", "instagram.com"]):
             await start_download(message, text, "video")
         else:
-            await message.answer("❌ Эту ссылку я не переварю. Давай TT, Insta или SoundCloud.")
-    
-    # Если это текст (поиск музыки), и это НЕ название кнопки
+            await message.answer("❌ Эту ссылку я не поддерживаю.")
     else:
         wait = await message.answer("🔍 Ищу треки в SoundCloud...")
         try:
             results = await asyncio.to_thread(search_sc, text)
             if not results:
-                await wait.edit_text("Ничего не нашел по этому названию.")
+                await wait.edit_text("Ничего не нашел.")
                 return
-
             builder = InlineKeyboardBuilder()
             for entry in results:
                 t_id, t_url = entry.get('id'), entry.get('webpage_url')
@@ -116,7 +108,6 @@ async def handle_message(message: types.Message):
                     sc_cache[t_id] = t_url
                     title = (entry.get('title')[:45] + '..') if len(entry.get('title')) > 45 else entry.get('title')
                     builder.row(types.InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"sc_{t_id}"))
-            
             await wait.delete()
             await message.answer("Выбери трек для загрузки:", reply_markup=builder.as_markup())
         except Exception as e:
@@ -126,20 +117,16 @@ async def start_download(message: types.Message, url, mode):
     status = await message.answer("⏳ Ща, скачиваю...")
     try:
         file_path, title = await asyncio.to_thread(sync_download, url, mode)
-        
         if os.path.getsize(file_path) > MAX_FILE_SIZE:
-            await status.edit_text("❌ Файл больше 50МБ, Телеграм не дает его отправить.")
+            await status.edit_text("❌ Файл больше 50МБ.")
             os.remove(file_path)
             return
-
-        await status.edit_text("📤 Отправляю файл...")
+        await status.edit_text("📤 Отправляю...")
         if mode == 'video':
             await message.answer_video(types.FSInputFile(file_path), caption=f"✅ {title}")
         else:
             await message.answer_audio(types.FSInputFile(file_path), title=title)
-            
-        if os.path.exists(file_path): 
-            os.remove(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
         await status.delete()
     except Exception as e:
         await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
@@ -149,14 +136,14 @@ async def callback_download(callback: types.CallbackQuery):
     track_id = callback.data.split("_")[1]
     url = sc_cache.get(track_id)
     if not url:
-        await callback.answer("Ошибка: поиск устарел, введи название еще раз.", show_alert=True)
+        await callback.answer("Ошибка ссылки, попробуй поиск заново", show_alert=True)
         return
     await callback.answer()
     await start_download(callback.message, url, "audio")
 
 async def main():
     if not os.path.exists('downloads'): os.makedirs('downloads')
-    print("Бот запущен и готов к работе!")
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
