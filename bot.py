@@ -70,10 +70,20 @@ def sync_download(url, mode):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if message.chat.type == 'private':
-        await message.answer(f"Здарова, {message.from_user.first_name}! 👋\nКидай ссылку или используй меню.", reply_markup=main_menu())
-    else:
-        await message.answer("Бот готов к работе в группе! Просто кидайте ссылки на TikTok/Reels/SoundCloud.")
+    welcome_text = (
+        f"Здарова, {message.from_user.first_name}! 👋\n"
+        "Я качаю видосы и музыку. Теперь и в группах!\n"
+        "Выбирай режим или просто кидай ссылку."
+    )
+    await message.answer(welcome_text, reply_markup=main_menu())
+
+@dp.message(F.text == "🎬 Скачать Видео (TT/Insta)")
+async def video_btn_handler(message: types.Message):
+    await message.answer("Понял! Присылай ссылку на ТикТок или Инстаграм. 📱")
+
+@dp.message(F.text == "🎵 Музыка (SoundCloud)")
+async def music_btn_handler(message: types.Message):
+    await message.answer("Без проблем! Присылай ссылку на SoundCloud или просто напиши название песни. 🎵")
 
 @dp.message(F.text.startswith(("http://", "https://")))
 async def handle_links(message: types.Message):
@@ -85,16 +95,13 @@ async def handle_links(message: types.Message):
 
 @dp.message(F.text)
 async def handle_text_search(message: types.Message):
-    # В группах реагируем на поиск только если это не нажатие на кнопки меню
-    if message.text in ["🎬 Скачать Видео (TT/Insta)", "🎵 Музыка (SoundCloud)"]:
-        return
-
+    # Если это не ссылка и не нажатие кнопки — ищем музыку
     wait = await message.answer("🔍 Ищу треки...")
     try:
         results = await asyncio.to_thread(search_sc, message.text)
         if not results:
             await wait.edit_text("Ничего не нашел.")
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             await wait.delete()
             return
             
@@ -106,9 +113,8 @@ async def handle_text_search(message: types.Message):
                 title = (entry.get('title')[:45] + '..') if len(entry.get('title')) > 45 else entry.get('title')
                 builder.row(types.InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"sc_{t_id}"))
         
-        # Отправляем список выбора
         await message.answer("Выбери трек:", reply_markup=builder.as_markup())
-        await wait.delete() # Удаляем "Ищу..."
+        await wait.delete()
         
     except Exception as e:
         await wait.edit_text(f"Ошибка поиска: {e}")
@@ -131,7 +137,6 @@ async def start_download(message: types.Message, url, mode):
         else:
             await message.answer_audio(FSInputFile(file_path), title=title)
         
-        # Удаляем сообщение статуса ("Отправляю...")
         await status.delete()
 
     except Exception as e:
@@ -152,7 +157,6 @@ async def callback_download(callback: types.CallbackQuery):
         return
     
     await callback.answer()
-    # Удаляем сообщение с кнопками выбора после нажатия, чтобы не занимало место
     await callback.message.delete()
     await start_download(callback.message, url, "audio")
 
