@@ -1,7 +1,8 @@
 aiogram
 yt-dlp
-static-ffmpeg
-pytesseract
+requests
 qrcode
+pytesseract
 Pillow
+google-generativeai
 static-ffmpeg
