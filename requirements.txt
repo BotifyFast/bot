@@ -1,8 +1,4 @@
-aiogram
-requests
-yt-dlp
-google-generativeai
-pydub
-SpeechRecognition
-qrcode
+pytesseract
 Pillow
+qrcode
+requests
