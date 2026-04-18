@@ -15,24 +15,24 @@ from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
 
+# --- ДАННЫЕ (Берем из твоих сообщений) ---
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Кэши
 sc_cache = {}
 temp_mail_cache = {}
 anon_queue = None
 anon_pairs = {}
 
+# Справочник городов
 CITIES_SHORT = {
-    "мск": "Moscow", "москва": "Moscow",
-    "спб": "Saint Petersburg", "питер": "Saint Petersburg",
-    "кст": "Kostanay", "костанай": "Kostanay",
-    "аст": "Astana", "астана": "Astana",
-    "алм": "Almaty", "алматы": "Almaty",
-    "екб": "Yekaterinburg", "нск": "Novosibirsk"
+    "мск": "Moscow", "спб": "Saint Petersburg", "питер": "Saint Petersburg",
+    "кст": "Kostanay", "костанай": "Kostanay", "аст": "Astana", 
+    "алм": "Almaty", "екб": "Yekaterinburg", "нск": "Novosibirsk"
 }
 
 JOKES = [
@@ -41,7 +41,6 @@ JOKES = [
     "Программист принес домой 11 пакетов молока, потому что в магазине были яйца."
 ]
 
-MAX_FILE_SIZE = 50 * 1024 * 1024
 COMMON_OPTS = {'user_agent': 'Mozilla/5.0', 'quiet': True, 'no_warnings': True}
 
 # --- КЛАВИАТУРЫ ---
@@ -70,14 +69,22 @@ def get_weather(city_query):
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
     try:
         res = requests.get(url, timeout=10).json()
-        if res.get("cod") != 200: return "❌ Город не найден."
+        if res.get("cod") != 200: return f"❌ Город '{clean_city}' не найден."
         return f"🌤 Погода в {res['name']}: {res['main']['temp']}°C, {res['weather'][0]['description']}"
     except: return "❌ Ошибка API."
 
+def get_crypto(coin_query):
+    coin = coin_query.lower().replace("флеш", "").replace("курс", "").strip()
+    mapping = {"биток": "bitcoin", "эфир": "ethereum", "тон": "the-open-network", "ton": "the-open-network"}
+    c_id = mapping.get(coin, coin)
+    try:
+        res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={c_id}&vs_currencies=usd").json()
+        return f"💰 Курс {coin.capitalize()}: ${res[c_id]['usd']}"
+    except: return "❌ Не нашел валюту."
+
 def gen_mail(user_id):
-    domains = ["1secmail.com", "1secmail.org", "1secmail.net"]
     login = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(10))
-    email = f"{login}@{random.choice(domains)}"
+    email = f"{login}@1secmail.com"
     temp_mail_cache[user_id] = email
     return email
 
@@ -85,67 +92,61 @@ def gen_mail(user_id):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Здарова! Я Флэш. Всё исправил, теперь кнопки и сокращения работают.", reply_markup=main_menu())
+    await message.answer("Здарова! Я Флэш. Всё включено, всё работает. Погнали!", reply_markup=main_menu())
 
 @dp.message(F.text.in_(["🚫 Остановить чат", "/stop"]))
 async def anon_stop(message: types.Message):
     global anon_queue
     uid = message.from_user.id
-    if uid == anon_queue:
+    if uid in anon_pairs:
+        p_id = anon_pairs.pop(uid)
+        anon_pairs.pop(p_id, None)
+        await bot.send_message(p_id, "🚫 Собеседник покинул чат.", reply_markup=main_menu())
+        await message.answer("Чат завершен.", reply_markup=main_menu())
+    elif uid == anon_queue:
         anon_queue = None
         await message.answer("Поиск остановлен.", reply_markup=main_menu())
-    elif uid in anon_pairs:
-        partner_id = anon_pairs.pop(uid)
-        anon_pairs.pop(partner_id, None)
-        await bot.send_message(partner_id, "🚫 Собеседник покинул чат.", reply_markup=main_menu())
-        await message.answer("Чат завершен.", reply_markup=main_menu())
-    else:
-        await message.answer("Ты не в чате.", reply_markup=main_menu())
 
 @dp.message(F.text.in_(["👥 Анонимный чат", "🚀 Следующий"]))
-async def anon_chat_logic(message: types.Message):
+async def anon_logic(message: types.Message):
     global anon_queue
     uid = message.from_user.id
+    if message.chat.type != 'private': return await message.reply("❌ Это только в личке!")
     
-    # Если нажал "Следующий", сначала разрываем старую пару
     if message.text == "🚀 Следующий" and uid in anon_pairs:
-        partner_id = anon_pairs.pop(uid)
-        anon_pairs.pop(partner_id, None)
-        await bot.send_message(partner_id, "🚫 Собеседник переключился на другого.", reply_markup=main_menu())
+        p_id = anon_pairs.pop(uid)
+        anon_pairs.pop(p_id, None)
+        await bot.send_message(p_id, "🚫 Собеседник переключился.", reply_markup=main_menu())
 
     if anon_queue and anon_queue != uid:
         p_id = anon_queue
         anon_pairs[uid], anon_pairs[p_id] = p_id, uid
         anon_queue = None
-        await bot.send_message(p_id, "🤝 Собеседник найден! Общайтесь.", reply_markup=anon_menu())
-        await message.answer("🤝 Собеседник найден! Общайтесь.", reply_markup=anon_menu())
+        await bot.send_message(p_id, "🤝 Собеседник найден!", reply_markup=anon_menu())
+        await message.answer("🤝 Собеседник найден!", reply_markup=anon_menu())
     else:
         anon_queue = uid
-        await message.answer("🔍 Ищу собеседника...", reply_markup=ReplyKeyboardBuilder().button(text="🚫 Остановить чат").as_markup(resize_keyboard=True))
+        await message.answer("🔍 Ищу...", reply_markup=ReplyKeyboardBuilder().button(text="🚫 Остановить чат").as_markup(resize_keyboard=True))
 
 @dp.message(F.text)
-async def handle_all_text(message: types.Message):
+async def handle_text(message: types.Message):
     text = message.text.lower()
     uid = message.from_user.id
 
-    # 1. Проверка системных кнопок
-    if text == "🎬 скачать видео":
-        return await message.answer("Просто скинь ссылку на TikTok или Instagram!")
-    if text == "🎵 музыка":
-        return await message.answer("Напиши название песни, и я найду её в SoundCloud.")
-    if text == "🌤 погода/💰 курс":
-        return await message.answer("Пиши: `Флеш погода спб` или `Флеш курс тон`")
+    # 1. Кнопки
+    if text == "🎬 скачать видео": return await message.answer("Кидай ссылку на ТТ или Инсту!")
+    if text == "🎵 музыка": return await message.answer("Напиши название трека, я поищу.")
+    if text == "🌤 погода/💰 курс": return await message.answer("Пиши: `Флеш погода спб` или `Флеш курс тон`.")
     if text == "📧 почта/🆕 qr":
         email = gen_mail(uid)
-        return await message.answer(f"📧 Твоя почта: `{email}`\n(Кнопки проверки появятся скоро)", parse_mode="Markdown")
+        return await message.answer(f"📧 Твоя почта: `{email}`")
+    if text == "🎲 игры/🤡 анекдот": return await message.answer("Пиши: `Флеш анекдот`, `Флеш монетка` или `Флеш рулетка`.")
 
     # 2. Команды "Флеш ..."
     if text.startswith("флеш"):
         if "анекдот" in text: await message.reply(f"🤡 {random.choice(JOKES)}")
         elif "погода" in text: await message.reply(get_weather(text))
-        elif "курс" in text:
-            coin = text.replace("флеш курс", "").strip()
-            await message.reply(f"💰 Запрашиваю курс {coin}...") # Логику CoinGecko можно оставить из прошлого кода
+        elif "курс" in text: await message.reply(get_crypto(text))
         elif "монетка" in text: await message.reply(f"🪙 {random.choice(['Орел', 'Решка'])}")
         elif "рулетка" in text: await message.reply("💥 ПАУ!" if random.randint(1, 6) == 1 else "👀 Осечка!")
         elif "qr" in text:
@@ -156,21 +157,19 @@ async def handle_all_text(message: types.Message):
             os.remove(path)
         return
 
-    # 3. Анонимный чат (пересылка)
-    if uid in anon_pairs:
-        await bot.send_message(anon_pairs[uid], message.text)
-        return
+    # 3. Анон чат (пересылка)
+    if uid in anon_pairs and message.chat.type == 'private':
+        return await bot.send_message(anon_pairs[uid], message.text)
 
-    # 4. Поиск музыки (если это не ссылка и не кнопка)
-    if message.chat.type == 'private' and not text.startswith("http"):
+    # 4. Ссылки
+    if text.startswith("http"):
+        mode = "audio" if "soundcloud.com" in text else "video"
+        return await start_download(message, message.text, mode)
+
+    # 5. Поиск музыки
+    if message.chat.type == 'private':
         wait = await message.answer("🔍 Ищу в SoundCloud...")
         await process_music_search(message, message.text, wait)
-        return
-
-    # 5. Ссылки
-    if text.startswith("http"):
-        if "soundcloud.com" in text: await start_download(message, message.text, "audio")
-        else: await start_download(message, message.text, "video")
 
 # --- СКАЧИВАНИЕ И ПОИСК ---
 async def process_music_search(message, query, wait_msg):
