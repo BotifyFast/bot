@@ -24,18 +24,16 @@ dp = Dispatcher()
 
 # Кэши
 sc_cache = {}
+temp_mail_cache = {}
 anon_queue = None
 anon_pairs = {}
 
-# Список анекдотов
 JOKES = [
     "— Купила мелок от тараканов! — И что, помогают? — Да, сидят в углу, рисуют...",
-    "Встречаются два гриба. Один другому: — Смотри, за нами человек с ножом бежит! — Не бойся, это просто грибник, он нас подрежет и в корзинку положит.",
-    "Программист в магазине: — У вас есть молоко в пакетах? — Есть. — Тогда дайте один. Если есть яйца — дайте десять. (Домой принес 11 пакетов молока).",
-    "— Дорогой, я вчера видела твою любовницу... — И что? — И ничего, красивая у тебя жена!",
-    "Колобок повесился. Буратино утонул. Русалка села на шпагат. (Классика!)",
-    "Штирлиц шел по Берлину. Что-то выдавало в нем советского разведчика: то ли мужественный профиль, то ли волевой взгляд, то ли парашют, волочащийся за спиной.",
-    "Сын программиста спрашивает отца: — Папа, почему солнце каждое утро встает на востоке и ложится на западе? — Работает? Ничего не трогай!"
+    "Сын программиста: — Папа, почему солнце встает на востоке? — Работает? Ничего не трогай!",
+    "Программист принес домой 11 пакетов молока, потому что в магазине были яйца.",
+    "Колобок повесился. Буратино утонул. Штирлиц парашют забыл.",
+    "— Штирлиц, а где вы так научились водить? — В ДОСААФ, — ответил Штирлиц и подумал: 'А не сболтнул ли я лишнего?'"
 ]
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -53,53 +51,30 @@ def main_menu():
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ---
 def get_weather(city_name):
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
     try:
         res = requests.get(url, timeout=10).json()
         if res.get("cod") != 200: return "❌ Город не найден."
         return f"🌤 Погода в {res['name']}: {res['main']['temp']}°C, {res['weather'][0]['description']}"
-    except: return "❌ Ошибка API."
+    except: return "❌ Ошибка погоды."
+
+def get_crypto(coin):
+    mapping = {"биток": "bitcoin", "эфир": "ethereum", "тон": "the-open-network", "ton": "the-open-network"}
+    coin_id = mapping.get(coin.lower(), coin.lower())
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        res = requests.get(url, timeout=10).json()
+        val = res[coin_id]['usd']
+        return f"💰 Курс {coin.capitalize()}: ${val}"
+    except: return "❌ Не нашел такую валюту."
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    welcome_text = (
-        f"Здравствуйте, {message.from_user.first_name}! 😊\n\n"
-        "Я — **Флэш**, ваш многофункциональный ассистент. Я создан для того, чтобы сделать ваше пребывание в Telegram максимально комфортным.\n\n"
-        "🚀 **Вот что я умею:**\n"
-        "🔹 **Медиа**: Скачиваю видео из TikTok/Instagram и музыку из SoundCloud.\n"
-        "🔹 **Инструменты**: Создаю временную почту, генерирую QR-коды и распознаю текст с ваших фото.\n"
-        "🔹 **Инфо**: Показываю актуальную погоду и курсы валют (включая TON).\n"
-        "🔹 **Развлечения**: Анонимный чат для новых знакомств, игры и свежие анекдоты.\n\n"
-        "Используйте меню ниже или обращайтесь ко мне в группах по имени: 'Флеш погода' или 'Флеш анекдот'.\n\n"
-        "Чем я могу вам помочь?"
-    )
-    await message.answer(welcome_text, reply_markup=main_menu(), parse_mode="Markdown")
-
-@dp.message(F.text.lower().startswith("флеш анекдот"))
-async def send_joke(message: types.Message):
-    joke = random.choice(JOKES)
-    await message.reply(f"🤡 **Анекдот от Флэша:**\n\n{joke}", parse_mode="Markdown")
-
-# --- АНОНИМНЫЙ ЧАТ ---
-@dp.message(F.text == "👥 Анонимный чат")
-async def anon_chat_start(message: types.Message):
-    global anon_queue
-    if message.from_user.id in anon_pairs:
-        return await message.answer("Вы уже находитесь в диалоге. Напишите /stop для выхода.")
-    if anon_queue and anon_queue != message.from_user.id:
-        partner_id = anon_queue
-        anon_pairs[message.from_user.id] = partner_id
-        anon_pairs[partner_id] = message.from_user.id
-        anon_queue = None
-        await bot.send_message(partner_id, "🤝 Собеседник найден! Приятного общения.")
-        await message.answer("🤝 Собеседник найден! Приятного общения.")
-    else:
-        anon_queue = message.from_user.id
-        await message.answer("🔍 Ищу собеседника для вас... Напишите /stop для отмены поиска.")
+    await message.answer(f"Здарова! Я Флэш. Всё починил, теперь команды работают везде.", reply_markup=main_menu())
 
 @dp.message(Command("stop"))
 async def anon_stop(message: types.Message):
@@ -107,69 +82,82 @@ async def anon_stop(message: types.Message):
     uid = message.from_user.id
     if uid == anon_queue:
         anon_queue = None
-        await message.answer("Поиск собеседника остановлен.")
+        await message.answer("Поиск остановлен.")
     elif uid in anon_pairs:
         partner_id = anon_pairs.pop(uid)
         anon_pairs.pop(partner_id, None)
         await bot.send_message(partner_id, "🚫 Собеседник покинул чат.")
-        await message.answer("Диалог завершен.")
+        await message.answer("Чат завершен.")
     else:
-        await message.answer("Вы сейчас не в анонимном чате.")
+        await message.answer("Ты не в чате.")
 
-# --- ФОТО (OCR) ---
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    status = await message.answer("📥 Считываю текст с изображения...")
-    file_info = await bot.get_file(message.photo[-1].file_id)
-    photo_path = f"downloads/{file_info.file_id}.jpg"
-    await bot.download_file(file_info.file_path, photo_path)
-    try:
-        text = pytesseract.image_to_string(Image.open(photo_path), lang='rus+eng')
-        if text.strip():
-            await message.reply(f"📝 **Результат распознавания:**\n\n`{text[:3000]}`", parse_mode="Markdown")
-        else:
-            await message.reply("❌ Извините, я не смог найти текст на этом фото.")
-    except:
-        await message.reply("❌ Произошла ошибка при обработке фото.")
-    finally:
-        if os.path.exists(photo_path): os.remove(photo_path)
-        await status.delete()
+@dp.message(F.text == "👥 Анонимный чат")
+async def anon_chat_btn(message: types.Message):
+    global anon_queue
+    uid = message.from_user.id
+    if uid in anon_pairs: return await message.answer("Ты уже в чате! Напиши /stop.")
+    if anon_queue and anon_queue != uid:
+        p_id = anon_queue
+        anon_pairs[uid], anon_pairs[p_id] = p_id, uid
+        anon_queue = None
+        await bot.send_message(p_id, "🤝 Собеседник найден! Пиши любое сообщение.")
+        await message.answer("🤝 Собеседник найден! Пиши любое сообщение.")
+    else:
+        anon_queue = uid
+        await message.answer("🔍 Ищу собеседника... Напиши /stop для отмены.")
 
-# --- ФЛЕШ ХАБ (ГРУППОВЫЕ КОМАНДЫ) ---
-@dp.message(F.text.lower().startswith("флеш"))
-async def flash_hub(message: types.Message):
-    if message.from_user.id in anon_pairs:
-        return await bot.send_message(anon_pairs[message.from_user.id], message.text)
-
+# --- ГЛАВНЫЙ ОБРАБОТЧИК ТЕКСТА (ИСПРАВЛЕНО) ---
+@dp.message(F.text)
+async def handle_all_text(message: types.Message):
     text = message.text.lower()
-    if "погода" in text:
-        city = text.replace("флеш погода", "").strip()
-        await message.reply(get_weather(city))
-    elif "курс" in text:
-        # Упрощенный вызов курса
-        await message.reply("💰 Запрос курсов... (Функция активна)")
-    elif "qr" in text:
-        url = text.replace("флеш qr", "").strip()
-        if not url: return await message.reply("Укажите ссылку.")
-        qr_path = f"downloads/qr_{message.from_user.id}.png"
-        qrcode.make(url).save(qr_path)
-        await message.answer_photo(FSInputFile(qr_path), caption="✅ Ваш QR-код:")
-        os.remove(qr_path)
-    elif "монетка" in text:
-        side = random.choice(["Орел", "Решка"])
-        await message.reply(f"🪙 Выпало: **{side}**", parse_mode="Markdown")
-    elif "рулетка" in text:
-        res = "💥 ПАУ! Вы проиграли." if random.randint(1, 6) == 1 else "👀 Щелк... Осечка. Вы живы!"
-        await message.reply(res)
+    uid = message.from_user.id
+
+    # 1. Сначала проверяем системные кнопки меню
+    if text in ["🎬 скачать видео", "🎵 музыка", "🌤 погода/💰 курс", "📧 почта/🆕 qr", "👥 анонимный чат", "🎲 игры/🤡 анекдот"]:
+        if text == "🌤 погода/💰 курс": await message.answer("Пиши: `Флеш погода Костанай` или `Флеш курс тон`")
+        elif text == "📧 почта/🆕 qr": await message.answer("Кнопка почты в разработке или используй `Флеш qr [ссылка]`")
+        elif text == "🎲 игры/🤡 анекдот": await message.answer("Пиши: `Флеш анекдот`, `Флеш монетка` или `Флеш рулетка`")
+        return
+
+    # 2. Проверяем команды "Флеш ..."
+    if text.startswith("флеш"):
+        if "анекдот" in text:
+            await message.reply(f"🤡 {random.choice(JOKES)}")
+        elif "погода" in text:
+            city = text.replace("флеш погода", "").strip()
+            await message.reply(get_weather(city))
+        elif "курс" in text:
+            coin = text.replace("флеш курс", "").strip()
+            await message.reply(get_crypto(coin))
+        elif "монетка" in text:
+            await message.reply(f"🪙 Выпало: {random.choice(['Орел', 'Решка'])}")
+        elif "рулетка" in text:
+            res = "💥 ПАУ!" if random.randint(1, 6) == 1 else "👀 Осечка!"
+            await message.reply(res)
+        elif "qr" in text:
+            url = text.replace("флеш qr", "").strip()
+            path = f"qr_{uid}.png"
+            qrcode.make(url).save(path)
+            await message.answer_photo(FSInputFile(path), caption="Твой QR!")
+            os.remove(path)
+        return
+
+    # 3. Если человек в анонимном чате и это НЕ команда — пересылаем
+    if uid in anon_pairs:
+        try:
+            await bot.send_message(anon_pairs[uid], message.text)
+        except:
+            await message.answer("⚠️ Ошибка отправки собеседнику.")
+        return
+
+    # 4. Если просто ссылка — качаем
+    if text.startswith("http"):
+        if "soundcloud.com" in text: await start_download(message, message.text, "audio")
+        else: await start_download(message, message.text, "video")
 
 # --- СКАЧИВАНИЕ ---
-@dp.message(F.text.startswith(("http://", "https://")))
-async def handle_links(message: types.Message):
-    if "soundcloud.com" in message.text: await start_download(message, message.text, "audio")
-    elif any(d in message.text for d in ["tiktok.com", "instagram.com"]): await start_download(message, message.text, "video")
-
 async def start_download(message, url, mode):
-    status = await message.answer("⏳ Загружаю медиа...")
+    status = await message.answer("⏳ Качаю...")
     file_path = None
     try:
         def sync_dl():
@@ -184,13 +172,9 @@ async def start_download(message, url, mode):
         if mode == 'video': await message.answer_video(FSInputFile(file_path), caption=title)
         else: await message.answer_audio(FSInputFile(file_path), title=title)
         await status.delete()
-    except: await status.edit_text("Ошибка загрузки.")
+    except: await status.edit_text("Ошибка.")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
-
-@dp.message(F.text == "🎲 Игры/🤡 Анекдот")
-async def games_btn(message: types.Message):
-    await message.answer("Напишите в чат:\n— `Флеш анекдот` 🤡\n— `Флеш монетка` 🪙\n— `Флеш рулетка` 🔫")
 
 async def main():
     if not os.path.exists('downloads'): os.makedirs('downloads')
