@@ -1,4 +1,4 @@
-import os, random, asyncio, logging, requests, qrcode, string, re, subprocess
+import os, random, asyncio, logging, requests, qrcode, string, re, json
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -6,6 +6,9 @@ from aiogram.types import FSInputFile, InlineKeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import google.generativeai as genai
 from yt_dlp import YoutubeDL
+from speech_recognition import Recognizer, AudioFile
+from pydub import AudioSegment
+import speech_recognition as sr
 
 logging.basicConfig(level=logging.INFO)
 
@@ -13,6 +16,9 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 WEATHER_KEY = "c2b2631749aead62cfdc86b394e6399f"
 GEMINI_KEY = "AIzaSyCwd4xf-PWyayAdL-yp3xx4-Tlm4aywGXQ"
+
+# Правильная модель Gemini (рабочая)
+GEMINI_MODEL = "gemini-1.5-flash"  # Эта точно работает
 
 # Сокращения городов
 CITY_MAP = {
@@ -23,15 +29,19 @@ CITY_MAP = {
 
 # Настройка ИИ
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-pro')
+model = genai.GenerativeModel(GEMINI_MODEL)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Создаем папку для временных файлов
+# Временные файлы
 TEMP_DIR = "temp_files"
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
+
+# Хранилище для анонимного чата
+anon_users = {}  # user_id -> session_id
+anon_messages = {}  # session_id -> last_message_time
 
 # --- КЛАВИАТУРА ---
 main_kb = ReplyKeyboardMarkup(
@@ -40,95 +50,57 @@ main_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="📧 Почта")],
         [KeyboardButton(text="🪙 Монета"), KeyboardButton(text="🔫 Рулетка")],
         [KeyboardButton(text="📈 Курс"), KeyboardButton(text="⚡️ Команды")],
-        [KeyboardButton(text="🤡 Анекдот"), KeyboardButton(text="🎬 Видео")]
+        [KeyboardButton(text="🤡 Анекдот"), KeyboardButton(text="🎲 Рандом")],
+        [KeyboardButton(text="👥 Анон Чат"), KeyboardButton(text="📸 Фото в текст")]
     ],
     resize_keyboard=True
 )
 
 # --- ФУНКЦИИ ---
 def clean_temp_files():
-    """Очистка старых файлов (старше 1 часа)"""
     now = datetime.now()
     for filename in os.listdir(TEMP_DIR):
         filepath = os.path.join(TEMP_DIR, filename)
         if os.path.isfile(filepath):
             file_time = datetime.fromtimestamp(os.path.getctime(filepath))
-            if (now - file_time).seconds > 3600:  # 1 час
+            if (now - file_time).seconds > 3600:
                 try:
                     os.remove(filepath)
                 except:
                     pass
 
-async def download_media(url, media_type="audio"):
-    """Скачивание медиа с автоочисткой"""
-    clean_temp_files()
-    timestamp = int(datetime.now().timestamp())
-    filename = f"{TEMP_DIR}/{media_type}_{timestamp}"
-    
-    ydl_opts = {
-        'outtmpl': filename,
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'force_generic_extractor': False,
-    }
-    
-    # Для TikTok/Instagram без водяных знаков
-    if 'tiktok.com' in url or 'instagram.com' in url:
-        ydl_opts.update({
-            'format': 'best',
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        })
-    
-    # Для аудио
-    if media_type == "audio":
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
-        filename = f"{filename}.mp3"
-    else:
-        ydl_opts.update({
-            'format': 'best[ext=mp4]/best',
-        })
-        filename = f"{filename}.mp4"
-    
+async def ask_gemini(prompt, image_path=None):
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
-        
-        # Проверяем существование файла
-        if os.path.exists(filename):
-            return filename
+        if image_path and os.path.exists(image_path):
+            import PIL.Image
+            img = PIL.Image.open(image_path)
+            response = await asyncio.to_thread(lambda: model.generate_content([prompt, img]))
         else:
-            # Ищем файл с другим расширением
-            for f in os.listdir(TEMP_DIR):
-                if f.startswith(os.path.basename(filename).split('.')[0]):
-                    return os.path.join(TEMP_DIR, f)
-            return None
-    except Exception as e:
-        logging.error(f"Download error: {e}")
-        return None
-
-async def ask_gemini(prompt):
-    try:
-        response = await asyncio.to_thread(lambda: model.generate_content(prompt))
+            response = await asyncio.to_thread(lambda: model.generate_content(prompt))
         return response.text[:3000]
     except Exception as e:
-        return f"❌ Ошибка ИИ: {str(e)[:100]}"
+        return f"❌ Ошибка ИИ: {str(e)[:150]}"
 
-def get_rates():
+def get_full_rates():
     try:
+        # Курсы ЦБ РФ
         r = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
         usd = r['Valute']['USD']['Value']
         eur = r['Valute']['EUR']['Value']
-        return f"💵 Доллар: {round(usd, 2)} ₽\n💶 Евро: {round(eur, 2)} ₽"
-    except:
-        return "❌ Ошибка API курсов."
+        kzt = r['Valute']['KZT']['Value'] / 100  # Тенге к рублю
+        
+        # Криптовалюты
+        crypto = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,the-open-network&vs_currencies=rub").json()
+        btc = crypto.get('bitcoin', {}).get('rub', 0)
+        ton = crypto.get('the-open-network', {}).get('rub', 0)
+        
+        return (f"💵 Доллар: {round(usd, 2)} ₽\n"
+                f"💶 Евро: {round(eur, 2)} ₽\n"
+                f"🇰🇿 Тенге: {round(kzt, 2)} ₽\n"
+                f"₿ Биткоин: {round(btc, 0)} ₽\n"
+                f"💎 TON: {round(ton, 2)} ₽")
+    except Exception as e:
+        return f"❌ Ошибка API: {str(e)[:50]}"
 
 def get_joke():
     jokes = [
@@ -142,26 +114,43 @@ def get_joke():
 # --- ОБРАБОТЧИКИ ---
 @dp.message(Command("start"))
 async def start(m: types.Message):
-    await m.answer("🤖 **Флеш(Комбайн) - Ахуенный бот!**\n\nВыбирай команды на клавиатуре 👇\n\n🎬 **Качай видео с TikTok/Instagram без водяных знаков!**\n🎵 **Слушай музыку!**\n🌦 **Узнавай погоду!**\n🤖 **Общайся с ИИ!**", 
+    await m.answer("🤖 **Флеш(Комбайн) - Ахуенный бот!**\n\n"
+                   "🎵 Музыка с SoundCloud\n"
+                   "📸 Распознавание фото в текст\n"
+                   "🎤 Голосовые в текст\n"
+                   "👥 Анонимный чат\n"
+                   "💰 Курсы валют и крипты\n\n"
+                   "Выбирай команды на клавиатуре 👇", 
                    parse_mode="Markdown", reply_markup=main_kb)
 
 @dp.message(F.text.in_(["⚡️ Команды", "флеш команды"]))
 async def cmds(m: types.Message):
     await m.answer("🤖 **Все команды:**\n\n"
                    "`флеш вопрос [текст]` - спросить ИИ\n"
-                   "`флеш курс` - курс валют\n"
-                   "`флеш музыка [название]` - найти музыку\n"
+                   "`флеш фото` - распознать текст с фото (ответь на фото)\n"
+                   "`флеш голос` - распознать голосовое (ответь на голосовое)\n"
+                   "`флеш курс` - курс валют + крипта\n"
+                   "`флеш музыка [название]` - найти музыку на SoundCloud\n"
                    "`флеш погода [город]` - погода\n"
                    "`флеш почта` - временная почта\n"
                    "`флеш монета` - орёл/решка\n"
                    "`флеш рулетка` - русская рулетка\n"
-                   "`флеш qr [ссылка]` - создать QR\n\n"
-                   "🎬 **Просто отправь ссылку на TikTok или Instagram** - скачаю видео без водяного знака!",
+                   "`флеш ролл [число]` - бросить кубик\n"
+                   "`флеш qr [ссылка]` - создать QR\n"
+                   "`флеш анон` - анонимный чат\n\n"
+                   "👥 **Анонимный чат:**\n"
+                   "`флеш анон найти` - найти собеседника\n"
+                   "`флеш анон стоп` - выйти из чата\n"
+                   "Просто пиши сообщения в чате",
                    parse_mode="Markdown")
 
-@dp.message(F.text.in_(["📈 Курс", "флеш курс"]))
-async def rates(m: types.Message):
-    await m.answer(get_rates())
+@dp.message(F.text == "📈 Курс")
+async def rates_cmd(m: types.Message):
+    await m.answer(get_full_rates())
+
+@dp.message(F.text == "флеш курс")
+async def rates_cmd2(m: types.Message):
+    await m.answer(get_full_rates())
 
 @dp.message(F.text.in_(["🪙 Монета", "флеш монета"]))
 async def coin(m: types.Message):
@@ -171,53 +160,278 @@ async def coin(m: types.Message):
 async def roulette(m: types.Message):
     await m.answer("💥 БАБАХ! Ты проиграл!" if random.randint(1, 6) == 1 else "💨 Щелчок... Жив, повезло!")
 
-@dp.message(F.text == "🤡 Анекдот")
-async def joke(m: types.Message):
+@dp.message(F.text.in_(["🤡 Анекдот"]))
+async def joke_cmd(m: types.Message):
     await m.answer(get_joke())
 
-@dp.message(F.text == "🎬 Видео")
-async def video_info(m: types.Message):
-    await m.answer("🎬 **Как скачать видео без водяного знака:**\n\n"
-                   "Просто отправь мне ссылку на:\n"
-                   "• TikTok (vm.tiktok.com или www.tiktok.com)\n"
-                   "• Instagram (www.instagram.com)\n\n"
-                   "Я скачаю видео в лучшем качестве и без водяных знаков!\n\n"
-                   "⚡️ Видео автоматически удаляются с сервера через час.",
-                   parse_mode="Markdown")
+@dp.message(F.text.in_(["🎲 Рандом", "флеш ролл"]))
+async def roll_dice(m: types.Message):
+    num = random.randint(1, 100)
+    await m.answer(f"🎲 Тебе выпало: **{num}**", parse_mode="Markdown")
 
-@dp.message(F.text == "🤖 ИИ")
-async def ai_info(m: types.Message):
-    await m.answer("🤖 **Спроси ИИ:**\n\nНапиши: `флеш вопрос твой вопрос`\n\nПример: `флеш вопрос кто ты?`", 
-                   parse_mode="Markdown")
+# Обработка флеш ролл с числом
+@dp.message(F.text.startswith("флеш ролл"))
+async def roll_dice_custom(m: types.Message):
+    parts = m.text.split()
+    if len(parts) > 1:
+        try:
+            max_num = int(parts[1])
+            if max_num > 1000:
+                max_num = 1000
+            num = random.randint(1, max_num)
+            await m.answer(f"🎲 Тебе выпало: **{num}** из {max_num}", parse_mode="Markdown")
+        except:
+            await m.answer("❌ Напиши число: `флеш ролл 50`", parse_mode="Markdown")
+    else:
+        num = random.randint(1, 100)
+        await m.answer(f"🎲 Тебе выпало: **{num}**", parse_mode="Markdown")
 
-@dp.message(F.text == "🌦 Погода")
-async def weather_info(m: types.Message):
-    await m.answer("🌦 **Узнать погоду:**\n\nНапиши: `флеш погода город`\n\nПримеры:\n`флеш погода екб`\n`флеш погода мск`\n`флеш погода костанай`",
-                   parse_mode="Markdown")
+# --- РАСПОЗНАВАНИЕ ФОТО В ТЕКСТ ---
+@dp.message(F.photo)
+async def photo_to_text(m: types.Message):
+    if m.caption and m.caption.startswith("флеш фото"):
+        photo = m.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_path = f"{TEMP_DIR}/photo_{m.from_user.id}.jpg"
+        await bot.download_file(file.file_path, file_path)
+        
+        wait_msg = await m.answer("📸 Распознаю текст с фото...")
+        text = await ask_gemini("Опиши что на этом фото и выведи весь текст который видишь", file_path)
+        await wait_msg.edit_text(f"📸 **Текст с фото:**\n\n{text[:3000]}", parse_mode="Markdown")
+        
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
-@dp.message(F.text == "🎵 Музыка")
-async def music_info(m: types.Message):
-    await m.answer("🎵 **Скачать музыку:**\n\nНапиши: `флеш музыка название трека`\n\nПример: `флеш музыка imagine dragons enemy`\n\nИщу на SoundCloud и YouTube!",
-                   parse_mode="Markdown")
+# --- РАСПОЗНАВАНИЕ ГОЛОСОВЫХ ---
+@dp.message(F.voice)
+async def voice_to_text(m: types.Message):
+    if m.caption and m.caption.startswith("флеш голос") or m.text == "флеш голос":
+        voice = m.voice
+        file = await bot.get_file(voice.file_id)
+        oga_path = f"{TEMP_DIR}/voice_{m.from_user.id}.ogg"
+        wav_path = f"{TEMP_DIR}/voice_{m.from_user.id}.wav"
+        
+        await bot.download_file(file.file_path, oga_path)
+        
+        # Конвертируем ogg в wav
+        audio = AudioSegment.from_ogg(oga_path)
+        audio.export(wav_path, format="wav")
+        
+        wait_msg = await m.answer("🎤 Распознаю голосовое сообщение...")
+        
+        # Распознаем речь
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+            try:
+                text = recognizer.recognize_google(audio_data, language="ru-RU")
+                await wait_msg.edit_text(f"🎤 **Текст голосового:**\n\n{text}")
+            except:
+                await wait_msg.edit_text("❌ Не удалось распознать голосовое сообщение")
+        
+        # Чистим файлы
+        for path in [oga_path, wav_path]:
+            if os.path.exists(path):
+                os.remove(path)
 
-@dp.message(F.text == "📧 Почта")
-async def mail_info(m: types.Message):
-    await m.answer("📧 **Временная почта:**\n\nНапиши: `флеш почта`\n\nПолучишь временный ящик и сможешь проверять письма!",
-                   parse_mode="Markdown")
+@dp.message(F.text == "📸 Фото в текст")
+async def photo_help(m: types.Message):
+    await m.answer("📸 **Как распознать текст с фото:**\n\n"
+                   "1. Отправь фото\n"
+                   "2. В подписи к фото напиши: `флеш фото`\n\n"
+                   "🤖 ИИ прочитает весь текст с картинки и опишет что на ней!")
 
-# --- ОСНОВНЫЕ КОМАНДЫ ---
+# --- МУЗЫКА С SOUNDCLOUD ---
+@dp.message(F.text.startswith("флеш музыка"))
+async def music_soundcloud(m: types.Message):
+    query = m.text.replace("флеш музыка", "").strip()
+    if not query:
+        await m.answer("🎵 Напиши название трека\nПример: `флеш музыка imagine dragons`", parse_mode="Markdown")
+        return
+    
+    msg = await m.answer(f"🔍 Ищу `{query}` на SoundCloud...")
+    
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'format': 'bestaudio',
+        }
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(lambda: ydl.extract_info(f"scsearch5:{query}", download=False))
+            entries = info.get('entries', [])
+            
+            if not entries:
+                await msg.edit_text("❌ Ничего не найдено на SoundCloud")
+                return
+            
+            kb = InlineKeyboardBuilder()
+            for idx, entry in enumerate(entries[:5]):
+                title = entry['title'][:40]
+                kb.add(InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"sc_{entry['url']}_{idx}"))
+            
+            kb.adjust(1)
+            await msg.edit_text("🎵 **Найдено на SoundCloud:**\nВыбери трек:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка поиска: {str(e)[:100]}")
+
+@dp.callback_query(F.data.startswith("sc_"))
+async def music_callback(c: types.CallbackQuery):
+    data = c.data.split("_", 2)
+    if len(data) < 2:
+        await c.answer("Ошибка", show_alert=True)
+        return
+    
+    url = data[1]
+    await c.message.delete()
+    
+    status_msg = await c.message.answer("🎵 Скачиваю музыку с SoundCloud... ⏳")
+    
+    try:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': f'{TEMP_DIR}/%(title)s_%(id)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
+            filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            
+            if not os.path.exists(filename):
+                for f in os.listdir(TEMP_DIR):
+                    if f.endswith('.mp3') and info['id'] in f:
+                        filename = os.path.join(TEMP_DIR, f)
+                        break
+            
+            if os.path.exists(filename):
+                await status_msg.delete()
+                await c.message.answer_audio(FSInputFile(filename), 
+                                            title=info.get('title', 'Track')[:100], 
+                                            performer=info.get('uploader', 'SoundCloud'))
+                os.remove(filename)
+            else:
+                await status_msg.edit_text("❌ Не удалось скачать трек")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+    
+    await c.answer()
+
+# --- АНОНИМНЫЙ ЧАТ ---
+@dp.message(F.text == "👥 Анон Чат")
+async def anon_help(m: types.Message):
+    await m.answer("👥 **Анонимный чат:**\n\n"
+                   "`флеш анон найти` - найти случайного собеседника\n"
+                   "`флеш анон стоп` - выйти из чата\n"
+                   "После подключения просто пиши сообщения - они пойдут собеседнику!\n\n"
+                   "🔒 Все сообщения анонимны, никто не узнает кто ты!")
+
+@dp.message(F.text.startswith("флеш анон найти"))
+async def anon_find(m: types.Message):
+    user_id = m.from_user.id
+    
+    # Ищем свободного собеседника
+    for uid, session in anon_users.items():
+        if session == "waiting" and uid != user_id:
+            # Нашли пару
+            anon_users[user_id] = uid
+            anon_users[uid] = user_id
+            await m.answer("✅ Найден собеседник! Можете общаться анонимно.\nДля выхода напиши: `флеш анон стоп`", parse_mode="Markdown")
+            await bot.send_message(uid, "✅ Найден собеседник! Можете общаться анонимно.\nДля выхода напиши: `флеш анон стоп`", parse_mode="Markdown")
+            return
+    
+    # Если нет свободных, ставим в очередь
+    anon_users[user_id] = "waiting"
+    await m.answer("🔍 Ищу собеседника... Как только кто-то подключится, я сообщу!\nДля отмены напиши: `флеш анон стоп`", parse_mode="Markdown")
+
+@dp.message(F.text.startswith("флеш анон стоп"))
+async def anon_stop(m: types.Message):
+    user_id = m.from_user.id
+    
+    if user_id in anon_users:
+        partner = anon_users[user_id]
+        if partner != "waiting" and partner in anon_users:
+            await bot.send_message(partner, "❌ Собеседник покинул чат\nДля поиска нового напиши: `флеш анон найти`", parse_mode="Markdown")
+            anon_users[partner] = "waiting"
+        
+        del anon_users[user_id]
+        await m.answer("❌ Вы вышли из анонимного чата", parse_mode="Markdown")
+    else:
+        await m.answer("❌ Вы не в чате", parse_mode="Markdown")
+
+# Пересылка сообщений в анонимном чате
+@dp.message(F.text)
+async def anon_message(m: types.Message):
+    user_id = m.from_user.id
+    text = m.text
+    
+    # Пропускаем команды
+    if text.startswith("флеш"):
+        return
+    
+    if user_id in anon_users:
+        partner = anon_users[user_id]
+        if partner != "waiting" and partner in anon_users:
+            await bot.send_message(partner, f"👤 Аноним: {text}")
+        elif partner == "waiting":
+            await m.answer("⏳ Вы в поиске собеседника... Напишите `флеш анон найти` для поиска", parse_mode="Markdown")
+
+# --- QR КОД ---
 @dp.message(F.text.startswith("флеш qr"))
 async def make_qr(m: types.Message):
     data = m.text[8:].strip()
     if not data:
-        await m.answer("❌ Введи ссылку или текст после `флеш qr`")
+        await m.answer("❌ Введи ссылку или текст после `флеш qr`\nПример: `флеш qr https://google.com`", parse_mode="Markdown")
         return
     path = f"{TEMP_DIR}/qr_{m.from_user.id}.png"
     qrcode.make(data).save(path)
-    await m.answer_photo(FSInputFile(path))
+    await m.answer_photo(FSInputFile(path), caption=f"✅ QR код для: {data[:100]}")
     if os.path.exists(path):
         os.remove(path)
 
+# --- ПОГОДА ---
+@dp.message(F.text.startswith("флеш погода"))
+async def weather(m: types.Message):
+    city_raw = m.text.replace("флеш погода", "").strip().lower()
+    if not city_raw:
+        await m.answer("🌦 Напиши город: `флеш погода екб`", parse_mode="Markdown")
+        return
+    
+    city = CITY_MAP.get(city_raw, city_raw)
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
+    try:
+        r = requests.get(url).json()
+        if r.get("cod") == 200:
+            temp = r['main']['temp']
+            feels = r['main']['feels_like']
+            desc = r['weather'][0]['description']
+            wind = r['wind']['speed']
+            await m.answer(f"🌤 **{r['name']}**\n🌡 {temp}°C (ощущается {feels}°C)\n📝 {desc}\n💨 Ветер: {wind} м/с")
+        else:
+            await m.answer("❌ Город не найден. Попробуй: екб, мск, спб, костанай")
+    except:
+        await m.answer("❌ Ошибка погоды")
+
+# --- ИИ ВОПРОС ---
+@dp.message(F.text.startswith("флеш вопрос"))
+async def ai_question(m: types.Message):
+    question = m.text.replace("флеш вопрос", "").strip()
+    if not question:
+        await m.answer("❌ Напиши вопрос после команды\nПример: `флеш вопрос ты кто`", parse_mode="Markdown")
+        return
+    wait = await m.answer("🤔 Думаю...")
+    answer = await ask_gemini(question)
+    await wait.edit_text(answer[:4000])
+
+# --- ПОЧТА ---
 @dp.message(F.text == "флеш почта")
 async def mail(m: types.Message):
     login = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -241,176 +455,21 @@ async def check_mail(c: types.CallbackQuery):
     except:
         await c.answer("❌ Ошибка проверки", show_alert=True)
 
-@dp.message(F.text.startswith("флеш погода"))
-async def weather(m: types.Message):
-    city_raw = m.text.replace("флеш погода", "").strip().lower()
-    if not city_raw:
-        await m.answer("🌦 Напиши город: `флеш погода екб`", parse_mode="Markdown")
-        return
-    
-    city = CITY_MAP.get(city_raw, city_raw)
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
-    try:
-        r = requests.get(url).json()
-        if r.get("cod") == 200:
-            temp = r['main']['temp']
-            feels = r['main']['feels_like']
-            desc = r['weather'][0]['description']
-            await m.answer(f"🌤 **{r['name']}**\n🌡 Температура: {temp}°C\n🤔 Ощущается: {feels}°C\n📝 {desc}")
-        else:
-            await m.answer("❌ Город не найден. Попробуй: екб, мск, спб, костанай")
-    except:
-        await m.answer("❌ Ошибка погоды")
-
-@dp.message(F.text.startswith("флеш вопрос"))
-async def ai_question(m: types.Message):
-    question = m.text.replace("флеш вопрос", "").strip()
-    if not question:
-        await m.answer("❌ Напиши вопрос после команды\nПример: `флеш вопрос ты кто`", parse_mode="Markdown")
-        return
-    wait = await m.answer("🤔 Думаю...")
-    answer = await ask_gemini(question)
-    await wait.edit_text(answer[:4000])
-
-@dp.message(F.text.startswith("флеш музыка"))
-async def download_music(m: types.Message):
-    query = m.text.replace("флеш музыка", "").strip()
-    if not query:
-        await m.answer("🎵 Напиши название трека\nПример: `флеш музыка imagine dragons`", parse_mode="Markdown")
-        return
-    
-    msg = await m.answer(f"🔍 Ищу `{query}`...")
-    
-    # Ищем на YouTube
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': True,
-        'format': 'bestaudio',
-    }
-    
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(lambda: ydl.extract_info(f"ytsearch5:{query}", download=False))
-            entries = info.get('entries', [])
-            
-            if not entries:
-                await msg.edit_text("❌ Ничего не найдено")
-                return
-            
-            # Создаем кнопки с результатами
-            kb = InlineKeyboardBuilder()
-            for idx, entry in enumerate(entries[:5]):
-                title = entry['title'][:40]
-                kb.add(InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"music_{entry['url']}_{idx}"))
-            
-            kb.adjust(1)
-            await msg.edit_text("🎵 **Найдено:**\nВыбери трек:", reply_markup=kb.as_markup(), parse_mode="Markdown")
-    except Exception as e:
-        await msg.edit_text(f"❌ Ошибка поиска: {str(e)[:100]}")
-
-@dp.callback_query(F.data.startswith("music_"))
-async def music_callback(c: types.CallbackQuery):
-    data = c.data.split("_", 2)
-    if len(data) < 2:
-        await c.answer("Ошибка", show_alert=True)
-        return
-    
-    url = data[1]
-    await c.message.delete()
-    
-    status_msg = await c.message.answer("🎵 Скачиваю музыку... Подожди немного ⏳")
-    
-    try:
-        # Скачиваем аудио
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': f'{TEMP_DIR}/%(title)s_%(id)s.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-        }
-        
-        with YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
-            
-            if not os.path.exists(filename):
-                # Ищем mp3 файл
-                for f in os.listdir(TEMP_DIR):
-                    if f.endswith('.mp3') and info['id'] in f:
-                        filename = os.path.join(TEMP_DIR, f)
-                        break
-            
-            if os.path.exists(filename):
-                await status_msg.delete()
-                await c.message.answer_audio(FSInputFile(filename), title=info.get('title', 'Track'), performer=info.get('uploader', 'Unknown'))
-                # Удаляем файл после отправки
-                os.remove(filename)
-            else:
-                await status_msg.edit_text("❌ Не удалось скачать трек")
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
-    
-    await c.answer()
-
-# --- СКАЧИВАНИЕ ВИДЕО С TikTok/Instagram ---
-@dp.message(F.text.regexp(r'(https?://)?(www\.)?(tiktok\.com|instagram\.com|vm\.tiktok\.com|instagr\.am)/.+'))
-async def download_social_video(m: types.Message):
-    url = m.text.strip()
-    msg = await m.answer("🎬 Скачиваю видео без водяного знака... ⏳")
-    
-    try:
-        # Оптимальные настройки для TikTok/Instagram
-        ydl_opts = {
-            'outtmpl': f'{TEMP_DIR}/video_%(id)s.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best[ext=mp4]/best',
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extractor_args': {'tiktok': {'embed': [True]}},
-        }
-        
-        with YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info)
-            
-            # Меняем расширение на mp4 если нужно
-            if not filename.endswith('.mp4'):
-                base = os.path.splitext(filename)[0]
-                if os.path.exists(f"{base}.mp4"):
-                    filename = f"{base}.mp4"
-                elif os.path.exists(f"{base}.webm"):
-                    filename = f"{base}.webm"
-            
-            if os.path.exists(filename):
-                await msg.delete()
-                await m.answer_video(FSInputFile(filename), caption=f"✅ Скачано без водяного знака!\n🎥 {info.get('title', 'Video')[:100]}")
-                # Удаляем файл после отправки
-                os.remove(filename)
-            else:
-                await msg.edit_text("❌ Не удалось скачать видео")
-    except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:100]}\n\nВозможно, видео недоступно или требует авторизации")
-
 # --- ФОЛЛБЕК ---
 @dp.message(F.text)
 async def fallback(m: types.Message):
-    text = m.text.lower()
-    if text.startswith("флеш"):
-        await m.answer("❌ Неизвестная команда. Напиши `флеш команды` для списка", parse_mode="Markdown")
-    else:
-        await m.answer("❓ Используй клавиатуру или команды с `флеш`\n\n🎬 Или отправь ссылку на TikTok/Instagram - скачаю видео!", 
+    if not m.text.startswith("флеш"):
+        await m.answer("❓ Используй клавиатуру или команды с `флеш`\n\n"
+                      "🎵 `флеш музыка` - найти трек\n"
+                      "👥 `флеш анон найти` - анонимный чат\n"
+                      "📸 Отправь фото с подписью `флеш фото`\n"
+                      "🎤 Отправь голосовое с подписью `флеш голос`", 
                       reply_markup=main_kb)
 
 async def main():
-    # Очищаем папку при старте
     clean_temp_files()
     print("✅ Бот Флеш запущен! Всё работает!")
+    print(f"🤖 Gemini модель: {GEMINI_MODEL}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
