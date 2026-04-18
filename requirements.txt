@@ -4,3 +4,4 @@ static-ffmpeg
 pytesseract
 qrcode
 Pillow
+static-ffmpeg
