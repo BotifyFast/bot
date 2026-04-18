@@ -4,5 +4,5 @@ requests
 qrcode
 pytesseract
 Pillow
-google-generativeai
+google-generativeai>=0.3.0
 static-ffmpeg
