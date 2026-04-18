@@ -1,8 +1,6 @@
-aiogram
-yt-dlp
-requests
-qrcode
-pytesseract
-Pillow
-google-generativeai
-static-ffmpeg
+aiogram==3.17.0
+requests==2.32.3
+qrcode==7.4.2
+Pillow==10.4.0
+google-generativeai==0.8.3
+yt-dlp==2024.12.13
