@@ -4,3 +4,5 @@ qrcode==7.4.2
 Pillow==10.4.0
 google-generativeai==0.8.3
 yt-dlp==2024.12.13
+SpeechRecognition==3.10.4
+pydub==0.25.1
