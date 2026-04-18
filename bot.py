@@ -5,8 +5,6 @@ import asyncio
 import logging
 import requests
 import qrcode
-import pytesseract
-from PIL import Image
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
@@ -27,192 +25,140 @@ anon_queue = None
 anon_pairs = {}
 
 CITIES_SHORT = {
-    "мск": "Moscow", "спб": "Saint Petersburg", "питер": "Saint Petersburg",
-    "кст": "Kostanay", "костанай": "Kostanay", "аст": "Astana", 
-    "алм": "Almaty", "екб": "Yekaterinburg", "нск": "Novosibirsk"
+    "мск": "Moscow", "спб": "Saint Petersburg", "кст": "Kostanay", 
+    "аст": "Astana", "алм": "Almaty", "екб": "Yekaterinburg"
 }
 
-JOKES = [
-    "Программист принес домой 11 пакетов молока, потому что в магазине были яйца.",
-    "— Купила мелок от тараканов! — И что, помогают? — Да, сидят в углу, рисуют...",
-    "Штирлиц шел по Берлину. Что-то выдавало в нем советского разведчика: то ли волевой взгляд, то ли парашют за спиной.",
-    "Гаишник: — Почему глаза красные? — Три дня не спал! — Не оправдывайтесь, дыхните!",
-    "Доктор, я и есть Пальяччи."
-]
-
-COMMON_OPTS = {'user_agent': 'Mozilla/5.0', 'quiet': True, 'no_warnings': True}
-
-# --- КЛАВИАТУРЫ ---
-def main_menu():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🎬 Скачать Видео")
-    builder.button(text="🎵 Музыка")
-    builder.button(text="🌤 Погода/💰 Курс")
-    builder.button(text="📧 Почта/🆕 QR")
-    builder.button(text="👥 Анонимный чат")
-    builder.button(text="🎲 Игры/🤡 Анекдот")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-def anon_menu():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🚀 Следующий")
-    builder.button(text="🚫 Остановить чат")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-# --- ФУНКЦИИ ---
-def get_weather(city_query):
-    clean_city = city_query.lower().replace("флеш", "").replace("погода", "").strip()
-    city = CITIES_SHORT.get(clean_city, clean_city)
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+# --- ЛОГИКА ВАЛЮТ (Тенге, Рубль, Доллар) ---
+def get_exchange_rate(text):
+    text = text.lower().replace("флеш", "").replace("курс", "").strip()
     try:
-        res = requests.get(url, timeout=10).json()
-        if res.get("cod") != 200: return f"❌ Город '{clean_city}' не найден."
-        return f"🌤 В {res['name']}: {res['main']['temp']}°C, {res['weather'][0]['description']}"
-    except: return "❌ Ошибка погоды."
-
-def get_crypto(coin_query):
-    coin = coin_query.lower().replace("флеш", "").replace("курс", "").strip()
-    # Обычные валюты (к рублю)
-    if coin in ["доллар", "usd", "доллара"]:
-        try:
-            res = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
-            return f"💵 Курс Доллара: {res['Valute']['USD']['Value']} руб."
-        except: pass
-    
-    # Крипта
-    mapping = {"биток": "bitcoin", "эфир": "ethereum", "тон": "the-open-network", "ton": "the-open-network", "btc": "bitcoin"}
-    c_id = mapping.get(coin, coin)
-    try:
-        res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={c_id}&vs_currencies=usd").json()
-        return f"💰 Курс {coin.capitalize()}: ${res[c_id]['usd']}"
-    except: return f"❌ Не нашел валюту '{coin}'."
+        # Получаем данные ЦБ РФ и Нацбанка (через открытое API)
+        res_ru = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
+        usd_to_rub = res_ru['Valute']['USD']['Value']
+        kzt_to_rub = res_ru['Valute']['KZT']['Value'] / (res_ru['Valute']['KZT']['Nominal'])
+        
+        # Логика конвертации
+        if "тенге к рублю" in text or "кст к руб" in text:
+            return f"🇰🇿➡️🇷🇺 100 Тенге = {round(kzt_to_rub * 100, 2)} руб."
+        elif "рубля к тенге" in text or "руб к тенге" in text:
+            return f"🇷🇺➡️🇰🇿 1 Рубль = {round(1 / kzt_to_rub, 2)} тенге."
+        elif "доллар к тенге" in text or "usd к кзт" in text:
+            usd_to_kzt = usd_to_rub / kzt_to_rub
+            return f"💵➡️🇰🇿 1 Доллар = {round(usd_to_kzt, 2)} тенге."
+        elif "доллар" in text or "usd" in text:
+            return f"💵 1 Доллар = {round(usd_to_rub, 2)} руб."
+        elif "тенге" in text or "kzt" in text:
+            return f"🇰🇿 100 Тенге = {round(kzt_to_rub * 100, 2)} руб."
+        else:
+            # Если это крипта (тон, биток)
+            mapping = {"тон": "the-open-network", "ton": "the-open-network", "биток": "bitcoin"}
+            c_id = mapping.get(text, text)
+            res_crypto = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={c_id}&vs_currencies=usd").json()
+            return f"💰 Курс {text.capitalize()}: ${res_crypto[c_id]['usd']}"
+    except:
+        return f"❌ Не осилил конвертацию '{text}'. Попробуй: 'флеш курс доллар к тенге'"
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Здарова! Я — Флэш. Добавил курс доллара и починил загрузку музыки. Погнали!", reply_markup=main_menu())
-
-@dp.message(F.text.in_(["🚫 Остановить чат", "/stop"]))
-async def anon_stop(message: types.Message):
-    global anon_queue
-    uid = message.from_user.id
-    if uid in anon_pairs:
-        p_id = anon_pairs.pop(uid)
-        anon_pairs.pop(p_id, None)
-        await bot.send_message(p_id, "🚫 Собеседник вышел.", reply_markup=main_menu())
-        await message.answer("Чат завершен.", reply_markup=main_menu())
-    elif uid == anon_queue:
-        anon_queue = None
-        await message.answer("Поиск отменен.", reply_markup=main_menu())
-
-@dp.message(F.text.in_(["👥 Анонимный чат", "🚀 Следующий"]))
-async def anon_logic(message: types.Message):
-    global anon_queue
-    uid = message.from_user.id
-    if message.chat.type != 'private': return await message.reply("❌ Только в личке!")
-    if message.text == "🚀 Следующий" and uid in anon_pairs:
-        p_id = anon_pairs.pop(uid)
-        anon_pairs.pop(p_id, None)
-        await bot.send_message(p_id, "🚫 Собеседник скипнул чат.", reply_markup=main_menu())
-
-    if anon_queue and anon_queue != uid:
-        p_id = anon_queue
-        anon_pairs[uid], anon_pairs[p_id] = p_id, uid
-        anon_queue = None
-        await bot.send_message(p_id, "🤝 Собеседник найден!", reply_markup=anon_menu())
-        await message.answer("🤝 Собеседник найден!", reply_markup=anon_menu())
-    else:
-        anon_queue = uid
-        await message.answer("🔍 Ищу...", reply_markup=ReplyKeyboardBuilder().button(text="🚫 Остановить чат").as_markup(resize_keyboard=True))
+    await message.answer("Флэш на связи! Починил курсы тенге и добавил обработку музыки. Не забудь поставить ffmpeg на сервер!", reply_markup=main_menu())
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     text = message.text.lower()
     uid = message.from_user.id
 
-    # 1. Кнопки
-    if text == "🎬 скачать видео": return await message.answer("Скинь ссылку (TikTok/Insta)!")
-    if text == "🎵 музыка": return await message.answer("Пиши: `Флеш музыка [название]`")
-    if text == "🌤 погода/💰 курс": return await message.answer("Пиши: `Флеш погода кст` или `Флеш курс доллар`.")
-    if text == "📧 почта/🆕 qr": 
-        login = ''.join(random.choice(string.ascii_lowercase) for _ in range(8))
-        return await message.answer(f"📧 Почта: `{login}@1secmail.com` \n\nИли: `Флеш qr [ссылка]`")
-
-    # 2. Команды "Флеш ..."
     if text.startswith("флеш"):
-        if "команды" in text:
-            return await message.reply("⚡️ Команды: `погода`, `курс`, `музыка`, `анекдот`, `qr`, `монетка`, `рулетка`.")
+        if "курс" in text:
+            return await message.reply(get_exchange_rate(text))
+        elif "команды" in text:
+            return await message.reply("⚡️ Команды: `погода`, `курс [валюта к валюте]`, `музыка`, `анекдот`, `qr`.")
         elif "музыка" in text:
             query = text.replace("флеш музыка", "").strip()
-            if not query: return await message.reply("А название?")
+            if not query: return await message.reply("Че искать то?")
             wait = await message.answer(f"🔍 Ищу '{query}'...")
             return await process_music_search(message, query, wait)
-        elif "анекдот" in text: return await message.reply(f"🤡 {random.choice(JOKES)}")
-        elif "погода" in text: return await message.reply(get_weather(text))
-        elif "курс" in text: return await message.reply(get_crypto(text))
-        elif "монетка" in text: return await message.reply(f"🪙 {random.choice(['Орел', 'Решка'])}")
-        elif "рулетка" in text: return await message.reply("💥 ПАУ!" if random.randint(1, 6) == 1 else "👀 Осечка!")
+        elif "анекдот" in text:
+            jokes = ["Штирлиц бил наверняка. Наверняк защищался как мог.", "Гаишник: — Дыхните! — Не буду, я на диете."]
+            return await message.reply(f"🤡 {random.choice(jokes)}")
         elif "qr" in text:
-            url = message.text[9:].strip()
+            url = text.replace("флеш qr", "").strip()
             path = f"qr_{uid}.png"
             qrcode.make(url).save(path)
             await message.answer_photo(FSInputFile(path))
             return os.remove(path)
 
-    # 3. Анон чат
+    # Анонимный чат
     if uid in anon_pairs and message.chat.type == 'private':
         return await bot.send_message(anon_pairs[uid], message.text)
 
-    # 4. Ссылки
+    # Загрузка по ссылкам
     if text.startswith("http"):
         mode = "audio" if "soundcloud.com" in text else "video"
         return await start_download(message, message.text, mode)
 
-# --- ЛОГИКА ---
-async def process_music_search(message, query, wait_msg):
-    try:
-        def search():
-            with YoutubeDL(COMMON_OPTS) as ydl:
-                return ydl.extract_info(f"scsearch5:{query}", download=False).get('entries', [])
-        results = await asyncio.to_thread(search)
-        if not results: return await wait_msg.edit_text("Ничего не нашел.")
-        builder = InlineKeyboardBuilder()
-        for entry in results:
-            t_id = entry.get('id')
-            sc_cache[t_id] = entry.get('webpage_url')
-            builder.row(types.InlineKeyboardButton(text=f"🎵 {entry.get('title')[:40]}", callback_data=f"sc_{t_id}"))
-        await message.answer("Выбери трек:", reply_markup=builder.as_markup())
-        await wait_msg.delete()
-    except Exception as e: await wait_msg.edit_text(f"Ошибка поиска: {e}")
-
+# --- ЗАГРУЗКА ---
 async def start_download(message, url, mode):
-    status = await message.answer("⏳ Качаю...")
+    status = await message.answer("⏳ Качаю (если это музыка, нужен ffmpeg на сервере)...")
     file_path = None
     try:
         def sync_dl():
-            opts = {**COMMON_OPTS, 'outtmpl': 'downloads/%(id)s.%(ext)s'}
-            if mode == 'audio': opts.update({'format': 'bestaudio', 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}]})
+            opts = {
+                'user_agent': 'Mozilla/5.0', 'quiet': True,
+                'outtmpl': 'downloads/%(id)s.%(ext)s',
+            }
+            if mode == 'audio':
+                opts.update({
+                    'format': 'bestaudio',
+                    'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}]
+                })
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 fp = ydl.prepare_filename(info)
                 if mode == 'audio': fp = os.path.splitext(fp)[0] + ".mp3"
                 return fp, info.get('title')
+        
         file_path, title = await asyncio.to_thread(sync_dl)
         if mode == 'video': await message.answer_video(FSInputFile(file_path), caption=title)
         else: await message.answer_audio(FSInputFile(file_path), title=title)
         await status.delete()
-    except Exception as e: await status.edit_text(f"Ошибка загрузки: {e}")
+    except Exception as e:
+        await status.edit_text(f"⚠️ Ошибка. Скорее всего, на сервере нет ffmpeg.\nЛог: {str(e)[:100]}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
+
+async def process_music_search(message, query, wait_msg):
+    try:
+        def search():
+            with YoutubeDL({'quiet': True}) as ydl:
+                return ydl.extract_info(f"scsearch5:{query}", download=False).get('entries', [])
+        results = await asyncio.to_thread(search)
+        if not results: return await wait_msg.edit_text("Пусто.")
+        builder = InlineKeyboardBuilder()
+        for entry in results:
+            t_id = entry.get('id')
+            sc_cache[t_id] = entry.get('webpage_url')
+            builder.row(types.InlineKeyboardButton(text=f"🎵 {entry.get('title')[:40]}", callback_data=f"sc_{t_id}"))
+        await message.answer("Выбирай трек:", reply_markup=builder.as_markup())
+        await wait_msg.delete()
+    except: await wait_msg.edit_text("Ошибка поиска.")
 
 @dp.callback_query(F.data.startswith("sc_"))
 async def cb_dl(callback: types.CallbackQuery):
     url = sc_cache.get(callback.data.split("_")[1])
     await callback.message.delete()
     await start_download(callback.message, url, "audio")
+
+def main_menu():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🎬 Скачать Видео")
+    builder.button(text="🎵 Музыка")
+    builder.button(text="🌤 Погода/💰 Курс")
+    builder.button(text="👥 Анонимный чат")
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
 
 async def main():
     if not os.path.exists('downloads'): os.makedirs('downloads')
