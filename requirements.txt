@@ -2,3 +2,4 @@ pytesseract
 Pillow
 qrcode
 requests
+aiogram
