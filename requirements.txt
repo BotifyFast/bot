@@ -1,10 +1,8 @@
 aiogram
-yt-dlp
 requests
-qrcode
-pytesseract
-Pillow
+yt-dlp
 google-generativeai
-static-ffmpeg
-SpeechRecognition
 pydub
+SpeechRecognition
+qrcode
+Pillow
