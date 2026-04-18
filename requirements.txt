@@ -3,3 +3,4 @@ Pillow
 qrcode
 requests
 aiogram
+yt_dlp
