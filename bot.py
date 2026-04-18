@@ -1,157 +1,146 @@
-import os, random, asyncio, logging, requests, datetime, string, qrcode
+import os, random, string, asyncio, logging, requests, qrcode, pytesseract
+from PIL import Image
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import FSInputFile, InlineKeyboardButton, KeyboardButton
+from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import FSInputFile
 from yt_dlp import YoutubeDL
-from pydub import AudioSegment
-import speech_recognition as sr
+
+# Фикс путей ffmpeg
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except:
+    pass
 
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
-WEATHER_KEY = "c2b2631749aead62cfdc86b394e6399f"
+WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-sc_cache = {}
 
-def main_kb():
-    kb = ReplyKeyboardBuilder()
-    btns = ["🌤 Погода", "📈 Курс", "📧 Почта", "🎵 Музыка", "🎲 Ролл", "🔫 Рулетка", "🪙 Монета", "📲 QR Код", "⚡️ Команды"]
-    for b in btns: kb.add(KeyboardButton(text=b))
-    kb.adjust(3, 3, 3)
-    return kb.as_markup(resize_keyboard=True)
+sc_cache, anon_queue, anon_pairs = {}, None, {}
+CITIES = {"мск": "Moscow", "спб": "Saint Petersburg", "кст": "Kostanay", "аст": "Astana", "алм": "Almaty"}
 
-# Функция для ГС и Кружков
-async def process_any_audio(m: types.Message, audio_obj):
-    wait = await m.answer("👂 Обрабатываю звук...")
-    fid = audio_obj.file_id
-    path_o, path_w = f"{fid}.ogg", f"{fid}.wav"
+# --- ЛОГИКА ПОЧТЫ (1secmail API) ---
+def get_mail_address(uid):
+    return f"flash_{uid}@1secmail.com"
+
+def check_mail(uid):
+    login = f"flash_{uid}"
+    domain = "1secmail.com"
+    url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}"
     try:
-        file = await bot.get_file(fid)
-        await bot.download_file(file.file_path, path_o)
-        AudioSegment.from_file(path_o).export(path_w, format="wav")
-        r = sr.Recognizer()
-        with sr.AudioFile(path_w) as s:
-            t = r.recognize_google(r.record(s), language="ru-RU")
-            await wait.edit_text(f"🎤 **Текст:**\n{t}")
-    except Exception as e:
-        await wait.edit_text(f"❌ Не удалось распознать текст.")
-    finally:
-        for f in [path_o, path_w]:
-            if os.path.exists(f): os.remove(f)
+        msgs = requests.get(url).json()
+        if not msgs: return "📭 Писем пока нет. Подожди немного и введи 'флеш письма' еще раз."
+        
+        last_id = msgs[0]['id']
+        msg_url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={last_id}"
+        data = requests.get(msg_url).json()
+        return f"📩 **От**: {data['from']}\n**Тема**: {data['subject']}\n\n**Текст**:\n{data['textBody'][:1000]}"
+    except: return "❌ Ошибка при проверке почты."
+
+# --- ОСТАЛЬНАЯ ЛОГИКА ---
+def get_weather(text):
+    clean = text.lower().replace("флеш", "").replace("погода", "").strip().split()
+    if not clean: return "❌ Город?"
+    city = CITIES.get(clean[0], clean[0])
+    try:
+        res = requests.get(f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru").json()
+        return f"🌤 В {res['name']}: {res['main']['temp']}°C, {res['weather'][0]['description']}"
+    except: return "❌ Город не найден."
+
+def get_exchange(text):
+    text = text.lower().replace("флеш", "").replace("курс", "").strip()
+    try:
+        r = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
+        u, k = r['Valute']['USD']['Value'], r['Valute']['KZT']['Value']/100
+        if "доллар к тенге" in text: return f"💵➡️🇰🇿 1$ = {round(u/k, 2)} тенге"
+        if "рубль к тенге" in text: return f"🇷🇺➡️🇰🇿 1₽ = {round(1/k, 2)} тенге"
+        if "доллар" in text: return f"💵 1$ = {round(u, 2)} руб."
+        return f"💰 TON: ${requests.get('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd').json()['the-open-network']['usd']}"
+    except: return "❌ Ошибка валют."
 
 # --- ОБРАБОТЧИКИ ---
-
-@dp.message(F.text.lower() == "флеш")
-async def flash_call(m: types.Message):
-    await m.reply("Чего звал? Я тут! Вот мои команды: /start или жми '⚡️ Команды'")
-
-@dp.message(F.text == "/start")
-async def cmd_start(m: types.Message):
-    await m.answer(f"Привет! Я бот **Флеш комбайн** ⚡️\n\nЯ умею качать музыку, распознавать ГС и кружки, делать почту и многое другое!", reply_markup=main_kb())
-
-# МУЗЫКА
-@dp.message(F.text.startswith("флеш музыка") | (F.text == "🎵 Музыка"))
-async def music_cmd(m: types.Message):
-    query = m.text.replace("флеш музыка", "").replace("🎵 Музыка", "").strip()
-    if not query: return await m.answer("Напиши название музыки! Пример: `флеш музыка Скриптонит`")
+@dp.message(F.text.startswith("флеш"))
+async def flash_cmds(m: types.Message):
+    t = m.text.lower()
+    uid = m.from_user.id
     
-    wait = await m.answer(f"🔍 Ищу трек...")
+    if "погода" in t: await m.reply(get_weather(t))
+    elif "курс" in t: await m.reply(get_exchange(t))
+    elif "почта" in t:
+        addr = get_mail_address(uid)
+        await m.reply(f"📧 Твоя временная почта:\n`{addr}`\n\nИспользуй её для регистрации. Чтобы прочитать входящие, напиши: `флеш письма`", parse_mode="Markdown")
+    elif "письма" in t:
+        await m.reply(check_mail(uid), parse_mode="Markdown")
+    elif "команды" in t: await m.reply("⚡️ Погода, Курс, Музыка, QR, Почта, Письма, Анекдот, Монетка")
+    elif "анекдот" in t: await m.reply(f"🤡 {random.choice(['Штирлиц...', 'Гаишник: Дыхните!'])}")
+    elif "музыка" in t:
+        q = t.replace("флеш музыка", "").strip()
+        if not q: return await m.reply("Что искать?")
+        wait = await m.answer(f"🔍 Ищу {q}...")
+        await search_music(m, q, wait)
+    elif "qr" in t:
+        url = m.text[8:].strip()
+        qrcode.make(url).save(f"qr_{uid}.png")
+        await m.answer_photo(FSInputFile(f"qr_{uid}.png"))
+        os.remove(f"qr_{uid}.png")
+
+@dp.message(F.text == "👥 Анонимный чат")
+async def start_anon(m: types.Message):
+    global anon_queue
+    if anon_queue and anon_queue != m.from_user.id:
+        p_id = anon_queue
+        anon_pairs[m.from_user.id], anon_pairs[p_id] = p_id, m.from_user.id
+        anon_queue = None
+        await bot.send_message(p_id, "🤝 Собеседник найден!")
+        await m.answer("🤝 Собеседник найден!")
+    else:
+        anon_queue = m.from_user.id
+        await m.answer("🔍 Ищу...")
+
+@dp.message(F.text)
+async def global_handler(m: types.Message):
+    if m.from_user.id in anon_pairs and m.chat.type == 'private':
+        return await bot.send_message(anon_pairs[m.from_user.id], m.text)
+    if m.text.startswith("http"):
+        mode = 'audio' if "soundcloud.com" in m.text else 'video'
+        await dl(m, m.text, mode)
+
+# --- ЗАГРУЗКА ---
+async def search_music(m, q, w):
     try:
         with YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl:
-            res = await asyncio.to_thread(lambda: ydl.extract_info(f"scsearch5:{query}", download=False))
-            entries = res.get('entries', [])
-        if not entries: return await wait.edit_text("❌ Ничего не найдено.")
-        
-        kb = InlineKeyboardBuilder()
-        for e in entries:
+            res = await asyncio.to_thread(lambda: ydl.extract_info(f"scsearch5:{q}", download=False)['entries'])
+        if not res: return await w.edit_text("Пусто.")
+        b = InlineKeyboardBuilder()
+        for e in res:
             sc_cache[e['id']] = e['webpage_url']
-            kb.row(InlineKeyboardButton(text=f"🎵 {e['title'][:40]}", callback_data=f"dl_{e['id']}"))
-        await wait.edit_text("Выбери трек:", reply_markup=kb.as_markup())
-    except: await wait.edit_text("❌ Ошибка поиска.")
+            b.row(types.InlineKeyboardButton(text=f"🎵 {e['title'][:35]}", callback_data=f"sc_{e['id']}"))
+        await m.answer("Выбери трек:", reply_markup=b.as_markup()); await w.delete()
+    except: await w.edit_text("Ошибка поиска.")
 
-@dp.callback_query(F.data.startswith("dl_"))
-async def music_download(c: types.CallbackQuery):
-    tid = c.data.replace("dl_", ""); url = sc_cache.get(tid)
-    if not url: return await c.answer("Ошибка")
-    await c.message.edit_text("📥 Качаю... (может занять время)")
-    path = f"downloads/{tid}.mp3"
+async def dl(m, url, mode):
+    s = await m.answer("⏳ Работаю...")
     try:
-        opts = {'outtmpl': path, 'format': 'bestaudio/best', 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}]}
-        with YoutubeDL(opts) as ydl:
-            await asyncio.to_thread(lambda: ydl.download([url]))
-        await c.message.answer_audio(FSInputFile(path))
-        await c.message.delete()
-    except Exception as e: await c.message.edit_text(f"❌ Ошибка: {e}")
-    finally:
-        if os.path.exists(path): os.remove(path)
+        o = {'outtmpl': 'downloads/%(id)s.%(ext)s', 'quiet': True, 'noplaylist': True}
+        if mode == 'audio':
+            o.update({'format': 'bestaudio', 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}]})
+        with YoutubeDL(o) as ydl:
+            info = await asyncio.to_thread(lambda: ydl.extract_info(url, download=True))
+            p = ydl.prepare_filename(info)
+            if mode == 'audio': p = os.path.splitext(p)[0] + ".mp3"
+        await (m.answer_video(FSInputFile(p)) if mode == 'video' else m.answer_audio(FSInputFile(p)))
+        os.remove(p); await s.delete()
+    except Exception as e: await s.edit_text(f"❌ Ошибка загрузки. Проверь ffmpeg!")
 
-# ПОЧТА
-@dp.message(F.text.in_(["📧 Почта", "флеш почта"]))
-async def mail_cmd(m: types.Message):
-    mail = f"{''.join(random.choices(string.ascii_lowercase + string.digits, k=10))}@1secmail.com"
-    kb = InlineKeyboardBuilder().row(InlineKeyboardButton(text="📥 Проверить письма", callback_data=f"chk_{mail}"))
-    await m.answer(f"📬 Почта на 5 минут:\n`{mail}`", reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("chk_"))
-async def mail_check(c: types.CallbackQuery):
-    l, d = c.data.replace("chk_", "").split('@')
-    res = requests.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={l}&domain={d}").json()
-    if not res: return await c.answer("Писем пока нет", show_alert=True)
-    msg = requests.get(f"https://www.1secmail.com/api/v1/?action=readMessage&login={l}&domain={d}&id={res[0]['id']}").json()
-    await c.message.answer(f"📩 **От:** {msg['from']}\n**Текст:**\n{msg['textBody']}")
-
-# ГОЛОС
-@dp.message(F.text.lower() == "флеш голос")
-async def voice_cmd(m: types.Message):
-    rep = m.reply_to_message
-    if rep and (rep.voice or rep.video_note or rep.audio):
-        await process_any_audio(m, rep.voice or rep.video_note or rep.audio)
-    else: await m.reply("Ответь этой командой на ГС или Кружок!")
-
-# QR
-@dp.message(F.text.startswith("флеш qr") | (F.text == "📲 QR Код"))
-async def qr_cmd(m: types.Message):
-    link = m.text.replace("флеш qr", "").replace("📲 QR Код", "").strip()
-    if not link: return await m.answer("Напиши ссылку! Пример: `флеш qr google.com`")
-    path = f"qr_{m.from_user.id}.png"
-    qrcode.make(link).save(path)
-    await m.answer_photo(FSInputFile(path), caption=f"QR: {link}")
-    if os.path.exists(path): os.remove(path)
-
-# РОЛЛ, ПОГОДА, КУРС, МОНЕТА, РУЛЕТКА
-@dp.message(F.text.startswith("флеш ролл") | (F.text == "🎲 Ролл"))
-async def roll_cmd(m: types.Message):
-    res = random.randint(1, 100)
-    await m.reply(f"🎲 Результат: **{res}**\nУ кого больше — тот и папа!")
-
-@dp.message(F.text.startswith("флеш погода") | (F.text == "🌤 Погода"))
-async def weather_cmd(m: types.Message):
-    city = m.text.replace("флеш погода", "").replace("🌤 Погода", "").strip() or "Костанай"
-    r = requests.get(f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru").json()
-    try:
-        await m.answer(f"🌤 **{city.capitalize()}**: {round(r['main']['temp'])}°C, {r['weather'][0]['description']}")
-    except: await m.answer("❌ Город не найден.")
-
-@dp.message(F.text.in_(["📈 Курс", "флеш курс"]))
-async def rates_cmd(m: types.Message):
-    r = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
-    c = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,the-open-network&vs_currencies=usd").json()
-    usd = r['Valute']['USD']['Value']
-    await m.answer(f"📊 **Курс:**\n💵 Доллар: {round(usd, 2)}₽\n₿ BTC: ${c['bitcoin']['usd']:,}\n💎 TON: ${c['the-open-network']['usd']}")
-
-@dp.message(F.text.in_(["флеш монетка", "🪙 Монета"]))
-async def coin_cmd(m: types.Message):
-    await m.reply(f"🪙 Выпало: **{random.choice(['Орёл', 'Решка'])}**")
-
-@dp.message(F.text.in_(["флеш рулетка", "🔫 Рулетка"]))
-async def roul_cmd(m: types.Message):
-    await m.reply(random.choice(["💥 БАХ!", "🔫 Осечка!"]))
-
-@dp.message(F.text.in_(["⚡️ Команды", "флеш команды"]))
-async def help_cmd(m: types.Message):
-    await m.answer("📜 **Команды:**\n• флеш погода\n• флеш музыка\n• флеш голос (на ГС)\n• флеш ролл\n• флеш монетка\n• флеш рулетка\n• флеш qr\n• флеш почта\n• флеш курс")
+@dp.callback_query(F.data.startswith("sc_"))
+async def sc_callback(c: types.CallbackQuery):
+    url = sc_cache.get(c.data.split("_")[1])
+    await c.message.delete(); await dl(c.message, url, "audio")
 
 async def main():
     if not os.path.exists('downloads'): os.makedirs('downloads')
