@@ -1,7 +1,6 @@
-pytesseract
-Pillow
-qrcode
-requests
-aiogram
-yt_dlp
-ffmpeg
+python-telegram-bot==21.5
+aiohttp==3.9.5
+aiofiles==23.2.1
+yt-dlp==2024.8.6
+SpeechRecognition==3.10.4
+requests==2.32.3
