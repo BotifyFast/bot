@@ -141,7 +141,27 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── МУЗЫКА: ПОИСК 5 ТРЕКОВ ───────────────────────────────────────────────────
 import shutil as _shutil
-_FFMPEG = _shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+
+def _find_ffmpeg():
+    # Сначала ищем в PATH
+    p = _shutil.which("ffmpeg")
+    if p: return p
+    # Пробуем imageio
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    # Стандартные пути
+    for path in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/store"]:
+        import glob, os
+        if os.path.exists(path): return path
+        matches = glob.glob(f"{path}/**/ffmpeg", recursive=True)
+        if matches: return matches[0]
+    return "ffmpeg"
+
+_FFMPEG = _find_ffmpeg()
+print(f"ffmpeg path: {_FFMPEG}")
 
 SC_OPTS_BASE = {
     "quiet": True,
