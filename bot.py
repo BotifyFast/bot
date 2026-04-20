@@ -9,7 +9,16 @@ import tempfile
 import string
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+# Автообновление yt-dlp при каждом запуске
+try:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
+    print("✅ yt-dlp обновлён")
+except Exception as e:
+    print(f"⚠️ Не удалось обновить yt-dlp: {e}")
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -131,46 +140,65 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Не удалось распознать речь.")
 
 # ─── МУЗЫКА: ПОИСК 5 ТРЕКОВ ───────────────────────────────────────────────────
+SC_OPTS_BASE = {
+    "quiet": True,
+    "no_warnings": True,
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://soundcloud.com/",
+    },
+    "extractor_args": {"soundcloud": {"client_id": [""]}},
+}
+
 async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
-    msg = await update.message.reply_text(f"🔍 Ищу *{query}* на SoundCloud...", parse_mode=ParseMode.MARKDOWN)
+    msg = await update.message.reply_text(f"🔍 Ищу *{query}*...", parse_mode=ParseMode.MARKDOWN)
     try:
         import yt_dlp
 
         def do_search():
             opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": True,
-                "default_search": "scsearch5",
+                **SC_OPTS_BASE,
+                "extract_flat": "in_playlist",
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(f"scsearch5:{query}", download=False)
-                return info
+                # Пробуем сначала SoundCloud, при ошибке — YouTube
+                try:
+                    info = ydl.extract_info(f"scsearch5:{query}", download=False)
+                    if info and info.get("entries"):
+                        return info, "sc"
+                except Exception:
+                    pass
+                # Fallback на YouTube
+                info = ydl.extract_info(f"ytsearch5:{query}", download=False)
+                return info, "yt"
 
         loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, do_search)
+        info, source = await loop.run_in_executor(None, do_search)
 
         entries = info.get("entries", []) if info else []
+        entries = [e for e in entries if e]  # убираем None
         if not entries:
-            await msg.edit_text("❌ Ничего не найдено на SoundCloud.")
+            await msg.edit_text("❌ Ничего не найдено.")
             return
 
         uid = update.effective_user.id
         results = []
         buttons = []
+        src_icon = "🔊" if source == "sc" else "▶️"
         for i, e in enumerate(entries[:5]):
-            title = e.get("title", f"Трек {i+1}")
-            url = e.get("url") or e.get("webpage_url", "")
+            title = e.get("title") or f"Трек {i+1}"
+            url = e.get("webpage_url") or e.get("url") or ""
             dur = int(e.get("duration") or 0)
             mins, secs = divmod(dur, 60)
             results.append({"title": title, "url": url, "duration": dur})
-            label = f"{i+1}. {title[:40]} ({mins}:{secs:02d})"
+            label = f"{src_icon} {i+1}. {title[:38]} ({mins}:{secs:02d})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"dl_music:{uid}:{i}")])
 
         pending_music[uid] = results
+        src_name = "SoundCloud" if source == "sc" else "YouTube"
 
         await msg.edit_text(
-            f"🎵 Найдено по запросу *{query}*:\n\nВыбери трек:",
+            f"🎵 Найдено на *{src_name}* по запросу *{query}*:\n\nВыбери трек:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
@@ -207,10 +235,9 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
             import yt_dlp
             output_template = os.path.join(tmpdir, "%(title)s.%(ext)s")
             ydl_opts = {
+                **SC_OPTS_BASE,
                 "format": "bestaudio/best",
                 "outtmpl": output_template,
-                "quiet": True,
-                "no_warnings": True,
                 "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
             }
 
