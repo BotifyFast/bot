@@ -127,7 +127,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ogg = os.path.join(tmpdir, "v.ogg")
             wav = os.path.join(tmpdir, "v.wav")
             await file.download_to_drive(ogg)
-            p = await asyncio.create_subprocess_exec("ffmpeg","-y","-i",ogg,wav, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            p = await asyncio.create_subprocess_exec(_FFMPEG,"-y","-i",ogg,"-ar","16000","-ac","1",mp3, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             await p.wait()
             import speech_recognition as sr
             r = sr.Recognizer()
