@@ -121,23 +121,34 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❗ Ответь на голосовое или кружок.")
         return
     status = await msg.reply_text("🎙 Распознаю...")
+    tmpdir = tempfile.mkdtemp()
     try:
         file = await context.bot.get_file(target.file_id)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ogg = os.path.join(tmpdir, "v.ogg")
-            wav = os.path.join(tmpdir, "v.wav")
-            await file.download_to_drive(ogg)
-            p = await asyncio.create_subprocess_exec(_FFMPEG,"-y","-i",ogg,"-ar","16000","-ac","1",mp3, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await p.wait()
-            import speech_recognition as sr
+        ogg = os.path.join(tmpdir, "v.ogg")
+        wav = os.path.join(tmpdir, "v.wav")
+        await file.download_to_drive(ogg)
+
+        p = await asyncio.create_subprocess_exec(
+            _FFMPEG, "-y", "-i", ogg, "-ar", "16000", "-ac", "1", "-f", "wav", wav,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await p.wait()
+        logger.info(f"Voice: wav exists={os.path.exists(wav)}, ffmpeg={_FFMPEG}")
+
+        import speech_recognition as sr
+        loop = asyncio.get_event_loop()
+        def do_recognize():
             r = sr.Recognizer()
             with sr.AudioFile(wav) as src:
                 audio = r.record(src)
-            text = r.recognize_google(audio, language="ru-RU")
-            await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
+            return r.recognize_google(audio, language="ru-RU")
+        text = await loop.run_in_executor(None, do_recognize)
+        await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Voice: {e}")
-        await status.edit_text("❌ Не удалось распознать речь.")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── МУЗЫКА: ПОИСК 5 ТРЕКОВ ───────────────────────────────────────────────────
 import shutil as _shutil
