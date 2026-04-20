@@ -1,7 +1,7 @@
 python-telegram-bot
 aiohttp
 aiofiles
-yt-dlp
+yt-dlp>=2024.12.13
 SpeechRecognition
 requests
 ffmpeg 
