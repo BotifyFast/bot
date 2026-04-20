@@ -4,3 +4,4 @@ aiofiles==23.2.1
 yt-dlp>=2024.12.13
 SpeechRecognition==3.10.4
 requests==2.32.3
+imageio[ffmpeg]
