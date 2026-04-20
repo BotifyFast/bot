@@ -488,7 +488,16 @@ def main():
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("⚡ Flash Bot запущен!")
-    app.run_polling(drop_pending_updates=True)
+
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    port = int(os.environ.get("PORT", 8443))
+
+    if webhook_url:
+        logger.info(f"Webhook: {webhook_url}")
+        app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url, drop_pending_updates=True)
+    else:
+        logger.info("Polling (локально)")
+        app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
