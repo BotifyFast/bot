@@ -1,7 +1,6 @@
-python-telegram-bot
-aiohttp
-aiofiles
+python-telegram-bot[webhooks]==21.5
+aiohttp==3.9.5
+aiofiles==23.2.1
 yt-dlp>=2024.12.13
-SpeechRecognition
-requests
-ffmpeg 
+SpeechRecognition==3.10.4
+requests==2.32.3
