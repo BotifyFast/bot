@@ -140,8 +140,12 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Не удалось распознать речь.")
 
 # ─── МУЗЫКА: ПОИСК 5 ТРЕКОВ ───────────────────────────────────────────────────
+import shutil as _shutil
+_FFMPEG = _shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+
 SC_OPTS_BASE = {
     "quiet": True,
+    "ffmpeg_location": _FFMPEG,
     "no_warnings": True,
     "http_headers": {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -377,6 +381,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
             ydl_opts = {
                 "format": "bestaudio/best", "outtmpl": output_template,
                 "quiet": True, "no_warnings": True,
+                "ffmpeg_location": _FFMPEG,
                 "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
                 "max_filesize": 48 * 1024 * 1024,
             }
