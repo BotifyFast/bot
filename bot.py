@@ -474,6 +474,115 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)  # ВСЕГДА удаляем файлы с сервера
 
+# ─── КУРС ВАЛЮТ ───────────────────────────────────────────────────────────────
+async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://open.er-api.com/v6/latest/USD") as r:
+                data = await r.json()
+        rates = data.get("rates", {})
+        await update.message.reply_text(
+            "💱 *Курс валют (к USD):*\n\n"
+            f"🇷🇺 RUB: `{rates.get('RUB', '?'):.2f}` ₽\n"
+            f"🇰🇿 KZT: `{rates.get('KZT', '?'):.2f}` ₸\n"
+            f"🇺🇦 UAH: `{rates.get('UAH', '?'):.2f}` ₴\n"
+            f"🇪🇺 EUR: `{rates.get('EUR', '?'):.4f}` €\n"
+            f"🇬🇧 GBP: `{rates.get('GBP', '?'):.4f}` £",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Rate: {e}")
+        await update.message.reply_text("❌ Ошибка получения курса.")
+
+# ─── ПОИСК ФИЛЬМОВ ────────────────────────────────────────────────────────────
+async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
+    if not query:
+        await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://www.omdbapi.com/?t={query}&apikey=trilogy") as r:
+                data = await r.json()
+        if data.get("Response") == "False":
+            await update.message.reply_text(f"❌ Фильм *{query}* не найден.", parse_mode=ParseMode.MARKDOWN)
+            return
+        title = data.get("Title", "?")
+        year = data.get("Year", "?")
+        plot = data.get("Plot", "Нет описания")
+        rating = data.get("imdbRating", "?")
+        genre = data.get("Genre", "?")
+        imdb_id = data.get("imdbID", "")
+        poster = data.get("Poster", "")
+        text = (
+            f"🎬 *{title}* ({year})\n\n"
+            f"⭐ IMDb: *{rating}*\n"
+            f"🎭 Жанр: {genre}\n\n"
+            f"📖 {plot}\n\n"
+            f"🔗 [Смотреть на IMDb](https://www.imdb.com/title/{imdb_id}/)"
+        )
+        if poster and poster != "N/A":
+            await update.message.reply_photo(photo=poster, caption=text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Movie: {e}")
+        await update.message.reply_text("❌ Ошибка поиска фильма.")
+
+# ─── СОКРАЩЕНИЕ ССЫЛОК ────────────────────────────────────────────────────────
+async def flash_short(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None):
+    if not url:
+        await update.message.reply_text("❗ Укажи ссылку: `флеш сократить https://example.com`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://tinyurl.com/api-create.php?url={url}") as r:
+                short = await r.text()
+        if short.startswith("http"):
+            await update.message.reply_text(f"🔗 *Короткая ссылка:*\n\n`{short}`", parse_mode=ParseMode.MARKDOWN)
+        else:
+            raise Exception("bad response")
+    except Exception as e:
+        logger.error(f"Short: {e}")
+        await update.message.reply_text("❌ Ошибка сокращения ссылки.")
+
+# ─── ПЕРЕВОД ──────────────────────────────────────────────────────────────────
+async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
+    if not query:
+        await update.message.reply_text("❗ Укажи текст: `флеш перевод hello world`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": query}
+            ) as r:
+                data = await r.json()
+        translated = "".join([item[0] for item in data[0] if item[0]])
+        src_lang = data[2] if len(data) > 2 else "?"
+        await update.message.reply_text(
+            f"🌍 *Перевод* (`{src_lang}` → `ru`):\n\n{translated}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Translate: {e}")
+        await update.message.reply_text("❌ Ошибка перевода.")
+
+# ─── МЕМ ──────────────────────────────────────────────────────────────────────
+async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://meme-api.com/gimme/dankmemes") as r:
+                data = await r.json()
+        url = data.get("url")
+        title = data.get("title", "Мем")
+        if url:
+            await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+        else:
+            raise Exception("No URL")
+    except Exception as e:
+        logger.error(f"Meme: {e}")
+        await update.message.reply_text("❌ Не удалось получить мем.")
+
 # ─── ОБРАБОТЧИК ТЕКСТА ────────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -511,8 +620,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "музыка":
         if arg: await flash_music_search(update, context, arg)
         else: await update.message.reply_text("❗ Укажи: `флеш музыка Imagine Dragons`", parse_mode=ParseMode.MARKDOWN)
-    elif cmd == "почта":    await flash_mail(update, context)
-    else:                   await flash_help(update, context)
+    elif cmd == "почта":     await flash_mail(update, context)
+    elif cmd == "курс":      await flash_rate(update, context)
+    elif cmd == "кино":      await flash_movie(update, context, query=arg or None)
+    elif cmd == "сократить": await flash_short(update, context, url=arg or None)
+    elif cmd == "перевод":   await flash_translate(update, context, query=arg or None)
+    elif cmd == "мем":       await flash_meme(update, context)
+    else:                    await flash_help(update, context)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
