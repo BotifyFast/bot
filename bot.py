@@ -560,15 +560,38 @@ async def tmdb_search(update, query: str, media_type: str):
         logger.error(f"TMDB search: {e}")
         await update.message.reply_text("❌ Ошибка поиска.")
 
+BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
+
+SHAME_RESPONSES = [
+    "🫣 АЙ-АЙ-АЙ! Иди лучше Машу и Медведя смотри!",
+    "😤 ЧТО ЭТО ТАКОЕ?! Марш смотреть Смешариков!",
+    "🙈 КАКОЙ СТЫД! Лунтик ждёт тебя, немедленно!",
+    "👀 Я ЧТО ВИЖУ?! Иди Фиксиков пересматривай!",
+    "😱 АЙ-АЙ-АЙ КАКОЙ(АЯ)! Телепузики обидятся!",
+    "🚫 НЕТ-НЕТ-НЕТ! Иди Губку Боба смотри давай!",
+    "😠 ТЫ СЕРЬЁЗНО?! Назад к Трём богатырям!",
+    "🫵 СТЫДОБА! Дед Мороз всё видит между прочим...",
+    "🙊 ОЙ ВСЁ! Иди лучше Простоквашино пересмотри!",
+    "😡 КТО ТАК ДЕЛАЕТ?! Ну-ка быстро включил Мультики!",
+    "🤦 Я В ШОКЕ! Барбоскины расстроились бы...",
+    "👮 СТОП! Дядя Стёпа уже едет разбираться!",
+]
+
 async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
         await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
+        return
+    if any(w in query.lower() for w in BAD_WORDS):
+        await update.message.reply_text(random.choice(SHAME_RESPONSES))
         return
     await tmdb_search(update, query, "movie")
 
 async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
         await update.message.reply_text("❗ Укажи название: `флеш сериал Мистер Робот`", parse_mode=ParseMode.MARKDOWN)
+        return
+    if any(w in query.lower() for w in BAD_WORDS):
+        await update.message.reply_text(random.choice(SHAME_RESPONSES))
         return
     await tmdb_search(update, query, "tv")
 
