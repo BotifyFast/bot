@@ -64,6 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📧 `флеш почта` — временная почта 10 мин\n"
         "💱 `флеш курс` — курс валют\n"
         "🎬 `флеш кино [название]` — поиск фильма\n"
+        "📺 `флеш сериал [название]` — поиск сериала\n"
         "🔗 `флеш сократить [ссылка]` — короткая ссылка\n"
         "📝 `флеш перевод [текст]` — перевод на русский\n"
         "😂 `флеш мем` — случайный мем\n"
@@ -519,62 +520,57 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка получения курса.")
 
 # ─── ПОИСК ФИЛЬМОВ ────────────────────────────────────────────────────────────
-async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
-    if not query:
-        await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
-        return
+TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
+
+async def tmdb_search(update, query: str, media_type: str):
+    """media_type: movie или tv"""
     try:
-        # Используем TMDB API с русским языком (бесплатный публичный ключ)
-        TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
         async with aiohttp.ClientSession() as s:
-            # Поиск фильма
             async with s.get(
-                f"https://api.themoviedb.org/3/search/movie",
+                f"https://api.themoviedb.org/3/search/{media_type}",
                 params={"api_key": TMDB_KEY, "query": query, "language": "ru-RU"}
             ) as r:
                 search = await r.json()
 
         results = search.get("results", [])
         if not results:
-            await update.message.reply_text(f"❌ Фильм *{query}* не найден.", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"❌ Ничего не найдено по запросу *{query}*.", parse_mode=ParseMode.MARKDOWN)
             return
 
-        movie = results[0]
-        movie_id = movie["id"]
+        # Показываем топ-5 результатов кнопками
+        buttons = []
+        for i, item in enumerate(results[:5]):
+            if media_type == "movie":
+                title = item.get("title", "?")
+                year = (item.get("release_date") or "")[:4]
+            else:
+                title = item.get("name", "?")
+                year = (item.get("first_air_date") or "")[:4]
+            rating = item.get("vote_average", 0)
+            label = f"{i+1}. {title[:35]} ({year}) ⭐{rating:.1f}"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"tmdb:{media_type}:{item['id']}")])
 
-        # Получаем детали на русском
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.themoviedb.org/3/movie/{movie_id}",
-                params={"api_key": TMDB_KEY, "language": "ru-RU"}
-            ) as r:
-                detail = await r.json()
-
-        title = detail.get("title", "?")
-        orig_title = detail.get("original_title", "")
-        year = (detail.get("release_date") or "")[:4]
-        overview = detail.get("overview") or "Описание отсутствует"
-        rating = detail.get("vote_average", 0)
-        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
-        poster_path = detail.get("poster_path", "")
-        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
-
-        text = (
-            f"🎬 *{title}*"
-            + (f" / {orig_title}" if orig_title != title else "")
-            + f" ({year})\n\n"
-            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
-            f"🎭 Жанр: {genres}\n\n"
-            f"📖 {overview}"
+        type_name = "🎬 Фильмы" if media_type == "movie" else "📺 Сериалы"
+        await update.message.reply_text(
+            f"{type_name} по запросу *{query}*:\n\nВыбери:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
-
-        if poster_url:
-            await update.message.reply_photo(photo=poster_url, caption=text, parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Movie: {e}")
-        await update.message.reply_text("❌ Ошибка поиска фильма.")
+        logger.error(f"TMDB search: {e}")
+        await update.message.reply_text("❌ Ошибка поиска.")
+
+async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
+    if not query:
+        await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
+        return
+    await tmdb_search(update, query, "movie")
+
+async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
+    if not query:
+        await update.message.reply_text("❗ Укажи название: `флеш сериал Мистер Робот`", parse_mode=ParseMode.MARKDOWN)
+        return
+    await tmdb_search(update, query, "tv")
 
 # ─── СОКРАЩЕНИЕ ССЫЛОК ────────────────────────────────────────────────────────
 async def flash_short(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None):
@@ -617,33 +613,49 @@ async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
 
 # ─── МЕМ ──────────────────────────────────────────────────────────────────────
 async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Русские сабреддиты с мемами
-    ru_subs = ["Pikabu", "ru_memes", "RusMemes", "2Russophobic4you", "polandball"]
-    sub = random.choice(ru_subs)
+    # Берём мемы с Pikabu через RSS
     try:
         async with aiohttp.ClientSession() as s:
-            # Пробуем русский сабреддит
-            async with s.get(f"https://meme-api.com/gimme/{sub}") as r:
-                data = await r.json()
-        url = data.get("url")
-        title = data.get("title", "Мем")
-        # Проверяем что это картинка
-        if url and any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-            await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
+                html = await r.text()
+
+        # Парсим картинки из Pikabu
+        import re as _re
+        imgs = _re.findall(r'data-large-image="([^"]+)"', html)
+        if not imgs:
+            imgs = _re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
+
+        if imgs:
+            url = random.choice(imgs[:20])
+            await update.message.reply_photo(photo=url, caption="😂 Мем с Пикабу")
         else:
-            # Fallback на любой мем
-            async with aiohttp.ClientSession() as s:
-                async with s.get("https://meme-api.com/gimme") as r:
-                    data = await r.json()
-            url = data.get("url")
-            title = data.get("title", "Мем")
-            if url:
-                await update.message.reply_photo(photo=url, caption=f"😂 {title}")
-            else:
-                raise Exception("No URL")
+            raise Exception("No images found")
     except Exception as e:
-        logger.error(f"Meme: {e}")
-        await update.message.reply_text("❌ Не удалось получить мем.")
+        logger.error(f"Meme pikabu: {e}")
+        # Fallback — мемы с русских реддитов через API
+        try:
+            ru_subs = ["ru_memes", "RusMemes", "Pikabu"]
+            async with aiohttp.ClientSession() as s:
+                for sub in ru_subs:
+                    async with s.get(
+                        f"https://www.reddit.com/r/{sub}/random/.json",
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    ) as r:
+                        if r.status != 200: continue
+                        data = await r.json()
+                        try:
+                            post = data[0]["data"]["children"][0]["data"]
+                            url = post.get("url", "")
+                            title = post.get("title", "Мем")
+                            if url and any(url.endswith(ext) for ext in [".jpg",".png",".jpeg",".gif"]):
+                                await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+                                return
+                        except: continue
+            await update.message.reply_text("😅 Мемы временно недоступны.")
+        except Exception as e2:
+            logger.error(f"Meme fallback: {e2}")
+            await update.message.reply_text("❌ Не удалось получить мем.")
 
 # ─── ОБРАБОТЧИК ТЕКСТА ────────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -685,10 +697,66 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "почта":     await flash_mail(update, context)
     elif cmd == "курс":      await flash_rate(update, context)
     elif cmd == "кино":      await flash_movie(update, context, query=arg or None)
+    elif cmd == "сериал":    await flash_series(update, context, query=arg or None)
     elif cmd == "сократить": await flash_short(update, context, url=arg or None)
     elif cmd == "перевод":   await flash_translate(update, context, query=arg or None)
     elif cmd == "мем":       await flash_meme(update, context)
     else:                    await flash_help(update, context)
+
+
+# ─── TMDB CALLBACK ────────────────────────────────────────────────────────────
+async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    media_type, tmdb_id = parts[1], parts[2]
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
+                params={"api_key": TMDB_KEY, "language": "ru-RU"}
+            ) as r:
+                detail = await r.json()
+
+        if media_type == "movie":
+            title = detail.get("title", "?")
+            year = (detail.get("release_date") or "")[:4]
+            icon = "🎬"
+            extra = ""
+        else:
+            title = detail.get("name", "?")
+            year = (detail.get("first_air_date") or "")[:4]
+            icon = "📺"
+            seasons = detail.get("number_of_seasons", "?")
+            episodes = detail.get("number_of_episodes", "?")
+            extra = f"\n📅 Сезонов: {seasons} | Серий: {episodes}"
+
+        orig_title = detail.get("original_title") or detail.get("original_name", "")
+        overview = detail.get("overview") or "Описание отсутствует"
+        rating = detail.get("vote_average", 0)
+        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
+        poster_path = detail.get("poster_path", "")
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+        text = (
+            f"{icon} *{title}*"
+            + (f" / {orig_title}" if orig_title and orig_title != title else "")
+            + f" ({year})\n\n"
+            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
+            f"🎭 Жанр: {genres}"
+            + extra
+            + f"\n\n📖 {overview}"
+        )
+
+        if poster_url:
+            await query.message.reply_photo(photo=poster_url, caption=text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"TMDB callback: {e}")
+        await query.answer("❌ Ошибка.", show_alert=True)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
@@ -698,6 +766,7 @@ def main():
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^check_mail:"))
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^delete_mail:"))
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
+    app.add_handler(CallbackQueryHandler(tmdb_callback, pattern="^tmdb:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("⚡ Flash Bot запущен!")
 
