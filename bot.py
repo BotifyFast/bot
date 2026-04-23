@@ -524,30 +524,54 @@ async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query:
         await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
         return
     try:
+        # Используем TMDB API с русским языком (бесплатный публичный ключ)
+        TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"https://www.omdbapi.com/?t={query}&apikey=trilogy") as r:
-                data = await r.json()
-        if data.get("Response") == "False":
+            # Поиск фильма
+            async with s.get(
+                f"https://api.themoviedb.org/3/search/movie",
+                params={"api_key": TMDB_KEY, "query": query, "language": "ru-RU"}
+            ) as r:
+                search = await r.json()
+
+        results = search.get("results", [])
+        if not results:
             await update.message.reply_text(f"❌ Фильм *{query}* не найден.", parse_mode=ParseMode.MARKDOWN)
             return
-        title = data.get("Title", "?")
-        year = data.get("Year", "?")
-        plot = data.get("Plot", "Нет описания")
-        rating = data.get("imdbRating", "?")
-        genre = data.get("Genre", "?")
-        imdb_id = data.get("imdbID", "")
-        poster = data.get("Poster", "")
+
+        movie = results[0]
+        movie_id = movie["id"]
+
+        # Получаем детали на русском
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.themoviedb.org/3/movie/{movie_id}",
+                params={"api_key": TMDB_KEY, "language": "ru-RU"}
+            ) as r:
+                detail = await r.json()
+
+        title = detail.get("title", "?")
+        orig_title = detail.get("original_title", "")
+        year = (detail.get("release_date") or "")[:4]
+        overview = detail.get("overview") or "Описание отсутствует"
+        rating = detail.get("vote_average", 0)
+        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
+        poster_path = detail.get("poster_path", "")
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
         text = (
-            f"🎬 *{title}* ({year})\n\n"
-            f"⭐ IMDb: *{rating}*\n"
-            f"🎭 Жанр: {genre}\n\n"
-            f"📖 {plot}\n\n"
-            f"🔗 [Смотреть на IMDb](https://www.imdb.com/title/{imdb_id}/)"
+            f"🎬 *{title}*"
+            + (f" / {orig_title}" if orig_title != title else "")
+            + f" ({year})\n\n"
+            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
+            f"🎭 Жанр: {genres}\n\n"
+            f"📖 {overview}"
         )
-        if poster and poster != "N/A":
-            await update.message.reply_photo(photo=poster, caption=text, parse_mode=ParseMode.MARKDOWN)
+
+        if poster_url:
+            await update.message.reply_photo(photo=poster_url, caption=text, parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Movie: {e}")
         await update.message.reply_text("❌ Ошибка поиска фильма.")
@@ -593,16 +617,30 @@ async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
 
 # ─── МЕМ ──────────────────────────────────────────────────────────────────────
 async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Русские сабреддиты с мемами
+    ru_subs = ["Pikabu", "ru_memes", "RusMemes", "2Russophobic4you", "polandball"]
+    sub = random.choice(ru_subs)
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get("https://meme-api.com/gimme/dankmemes") as r:
+            # Пробуем русский сабреддит
+            async with s.get(f"https://meme-api.com/gimme/{sub}") as r:
                 data = await r.json()
         url = data.get("url")
         title = data.get("title", "Мем")
-        if url:
+        # Проверяем что это картинка
+        if url and any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
             await update.message.reply_photo(photo=url, caption=f"😂 {title}")
         else:
-            raise Exception("No URL")
+            # Fallback на любой мем
+            async with aiohttp.ClientSession() as s:
+                async with s.get("https://meme-api.com/gimme") as r:
+                    data = await r.json()
+            url = data.get("url")
+            title = data.get("title", "Мем")
+            if url:
+                await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+            else:
+                raise Exception("No URL")
     except Exception as e:
         logger.error(f"Meme: {e}")
         await update.message.reply_text("❌ Не удалось получить мем.")
