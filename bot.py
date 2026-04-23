@@ -1,5 +1,4 @@
 import logging
-import logging
 import random
 import os
 import re
@@ -63,6 +62,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎙 `флеш голос` — голосовое → текст\n"
         "🎵 `флеш музыка [название]` — выбрать из 5 треков\n"
         "📧 `флеш почта` — временная почта 10 мин\n"
+        "💱 `флеш курс` — курс валют\n"
+        "🎬 `флеш кино [название]` — поиск фильма\n"
+        "🔗 `флеш сократить [ссылка]` — короткая ссылка\n"
+        "📝 `флеш перевод [текст]` — перевод на русский\n"
+        "😂 `флеш мем` — случайный мем\n"
         "⚡ `флеш` — список команд\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok/Instagram — скачаю!"
     )
@@ -136,15 +140,34 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await p.wait()
         logger.info(f"Voice: wav exists={os.path.exists(wav)}, ffmpeg={_FFMPEG}")
 
-        import speech_recognition as sr
+        # Отправляем wav в Google Speech API напрямую через requests
+        import requests as _requests
         loop = asyncio.get_event_loop()
         def do_recognize():
-            r = sr.Recognizer()
-            with sr.AudioFile(wav) as src:
-                audio = r.record(src)
-            return r.recognize_google(audio, language="ru-RU")
+            with open(wav, "rb") as f:
+                wav_data = f.read()
+            resp = _requests.post(
+                "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
+                data=wav_data,
+                headers={"Content-Type": "audio/l16; rate=16000"}
+            )
+            import json as _json
+            result = ""
+            for line in resp.text.strip().split("\n"):
+                if not line.strip(): continue
+                try:
+                    d = _json.loads(line)
+                    for r in d.get("result", []):
+                        alts = r.get("alternative", [])
+                        if alts:
+                            result += alts[0].get("transcript", "") + " "
+                except: continue
+            return result.strip()
         text = await loop.run_in_executor(None, do_recognize)
-        await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
+        if text:
+            await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await status.edit_text("🎙 Речь не распознана.")
     except Exception as e:
         logger.error(f"Voice: {e}")
         await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
