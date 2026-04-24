@@ -29,6 +29,7 @@ from telegram.constants import ChatType, ParseMode
 
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
+OWNER_ID = 123456789  # ← ЗАМЕНИ НА СВОЙ TELEGRAM ID! Узнать: @userinfobot
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,25 @@ URL_REGEX = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
 # Хранилище: pending_music[user_id] = [(title, url, duration), ...]
 pending_music = {}
+# Хранилище для предложений: кто сейчас вводит идею
+pending_idea = set()
+
+# Список стыдных ответов для фильмов/сериалов 18+
+BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
+SHAME_RESPONSES = [
+    "🫣 АЙ-АЙ-АЙ! Иди лучше Машу и Медведя смотри!",
+    "😤 ЧТО ЭТО ТАКОЕ?! Марш смотреть Смешариков!",
+    "🙈 КАКОЙ СТЫД! Лунтик ждёт тебя, немедленно!",
+    "👀 Я ЧТО ВИЖУ?! Иди Фиксиков пересматривай!",
+    "😱 АЙ-АЙ-АЙ КАКОЙ(АЯ)! Телепузики обидятся!",
+    "🚫 НЕТ-НЕТ-НЕТ! Иди Губку Боба смотри давай!",
+    "😠 ТЫ СЕРЬЁЗНО?! Назад к Трём богатырям!",
+    "🫵 СТЫДОБА! Дед Мороз всё видит между прочим...",
+    "🙊 ОЙ ВСЁ! Иди лучше Простоквашино пересмотри!",
+    "😡 КТО ТАК ДЕЛАЕТ?! Ну-ка быстро включил Мультики!",
+    "🤦 Я В ШОКЕ! Барбоскины расстроились бы...",
+    "👮 СТОП! Дядя Стёпа уже едет разбираться!",
+]
 
 def is_private(u): return u.effective_chat.type == ChatType.PRIVATE
 def extract_url(t):
@@ -49,7 +69,8 @@ def is_audio_url(url): return "soundcloud.com" in url.lower()
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("🎲 Ролл"), KeyboardButton("🪙 Монетка")],
      [KeyboardButton("🌤 Погода"), KeyboardButton("🎵 Музыка")],
-     [KeyboardButton("📧 Почта (5 мин)"), KeyboardButton("⚡ Флеш")]],
+     [KeyboardButton("📧 Почта (5 мин)"), KeyboardButton("⚡ Флеш")],
+     [KeyboardButton("💡 Предложить")]],
     resize_keyboard=True, is_persistent=True
 )
 
@@ -68,6 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔗 `флеш сократить [ссылка]` — короткая ссылка\n"
         "📝 `флеш перевод [текст]` — перевод на русский\n"
         "😂 `флеш мем` — случайный мем\n"
+        "💡 `флеш предложить` или кнопка — идея для бота\n"
         "⚡ `флеш` — список команд\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok/Instagram — скачаю!"
     )
@@ -324,11 +346,11 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"Music dl: {e}")
             await query.message.edit_text("❌ Не удалось скачать трек.")
         finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)  # удаляем файлы с сервера
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
         return
 
-    # ── ПОЧТА ──
+    # ── ПОЧТА (старый метод mail.tm) ──
     if data.startswith("check_mail:"):
         token = data.split(":", 1)[1]
         try:
@@ -364,7 +386,6 @@ async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📧 Создаю адрес...")
     try:
         async with aiohttp.ClientSession() as s:
-            # Используем guerrillamail — не требует регистрации
             async with s.get("https://api.guerrillamail.com/ajax.php?f=get_email_address") as r:
                 data = await r.json()
                 email = data["email_addr"]
@@ -424,6 +445,63 @@ async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif data == "gm_delete":
         await query.message.edit_text("🗑 Почта закрыта.")
+
+# ─── ПРЕДЛОЖЕНИЯ / ИДЕИ 💡 ────────────────────────────────────────────────────
+async def flash_idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Активирует режим ввода предложения"""
+    user_id = update.effective_user.id
+    pending_idea.add(user_id)
+    await update.message.reply_text(
+        "💡 *Жду твою идею!*\n\n"
+        "Напиши одним сообщением, что бы ты хотел добавить или изменить в боте.\n"
+        "Для отмены напиши `отмена`.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def flash_idea_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает текст предложения"""
+    user_id = update.effective_user.id
+    user = update.effective_user
+    text = update.message.text.strip()
+
+    if text.lower() == "отмена":
+        pending_idea.discard(user_id)
+        await update.message.reply_text("❌ Отменено.")
+        return
+
+    # Формируем запись
+    name = user.full_name
+    username = f"@{user.username}" if user.username else "нет username"
+    idea_text = (
+        f"\n{'='*50}\n"
+        f"💡 НОВАЯ ИДЕЯ\n"
+        f"От: {name} ({username}) | ID: {user_id}\n"
+        f"Дата: {update.message.date}\n"
+        f"{'='*50}\n"
+        f"{text}\n"
+    )
+
+    # Сохраняем в файл
+    try:
+        with open("ideas.txt", "a", encoding="utf-8") as f:
+            f.write(idea_text)
+        logger.info(f"Идея сохранена от {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения идеи: {e}")
+
+    # Отправляем владельцу в личку
+    try:
+        owner_msg = (
+            f"💡 *Новая идея!*\n\n"
+            f"👤 {name} (`{user_id}`)\n"
+            f"📝 {text}"
+        )
+        await context.bot.send_message(OWNER_ID, owner_msg, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Не удалось отправить идею владельцу: {e}")
+
+    pending_idea.discard(user_id)
+    await update.message.reply_text("✅ *Спасибо! Идея отправлена.*", parse_mode=ParseMode.MARKDOWN)
 
 # ─── СКАЧАТЬ ВИДЕО ПО ССЫЛКЕ ──────────────────────────────────────────────────
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -497,7 +575,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         else:
             await msg.edit_text("❌ Не удалось скачать.")
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)  # ВСЕГДА удаляем файлы с сервера
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── КУРС ВАЛЮТ ───────────────────────────────────────────────────────────────
 async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -519,8 +597,24 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Rate: {e}")
         await update.message.reply_text("❌ Ошибка получения курса.")
 
-# ─── ПОИСК ФИЛЬМОВ ────────────────────────────────────────────────────────────
+# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ С ПОДМЕНОЙ ССЫЛКИ ──────────────────────────────
 TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
+KINOPOISK_ID_PREFIX = "kp"  # префикс для ID Кинопоиска в TMDB
+
+def make_sspoisk_link(media_type: str, tmdb_id: int, imdb_id: str = None) -> str:
+    """
+    Создаёт ссылку на sspoint (бесплатный просмотр).
+    Если есть IMDB ID — используем его, иначе пробуем TMDB ID.
+    """
+    # sspoint использует разные форматы для фильмов и сериалов
+    if media_type == "movie":
+        if imdb_id and imdb_id.startswith("tt"):
+            return f"https://www.sspoisk.ru/film/{imdb_id}/"
+        return f"https://www.sspoisk.ru/film/{tmdb_id}/"
+    else:
+        if imdb_id and imdb_id.startswith("tt"):
+            return f"https://www.sspoisk.ru/series/{imdb_id}/"
+        return f"https://www.sspoisk.ru/series/{tmdb_id}/"
 
 async def tmdb_search(update, query: str, media_type: str):
     """media_type: movie или tv"""
@@ -560,23 +654,6 @@ async def tmdb_search(update, query: str, media_type: str):
         logger.error(f"TMDB search: {e}")
         await update.message.reply_text("❌ Ошибка поиска.")
 
-BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
-
-SHAME_RESPONSES = [
-    "🫣 АЙ-АЙ-АЙ! Иди лучше Машу и Медведя смотри!",
-    "😤 ЧТО ЭТО ТАКОЕ?! Марш смотреть Смешариков!",
-    "🙈 КАКОЙ СТЫД! Лунтик ждёт тебя, немедленно!",
-    "👀 Я ЧТО ВИЖУ?! Иди Фиксиков пересматривай!",
-    "😱 АЙ-АЙ-АЙ КАКОЙ(АЯ)! Телепузики обидятся!",
-    "🚫 НЕТ-НЕТ-НЕТ! Иди Губку Боба смотри давай!",
-    "😠 ТЫ СЕРЬЁЗНО?! Назад к Трём богатырям!",
-    "🫵 СТЫДОБА! Дед Мороз всё видит между прочим...",
-    "🙊 ОЙ ВСЁ! Иди лучше Простоквашино пересмотри!",
-    "😡 КТО ТАК ДЕЛАЕТ?! Ну-ка быстро включил Мультики!",
-    "🤦 Я В ШОКЕ! Барбоскины расстроились бы...",
-    "👮 СТОП! Дядя Стёпа уже едет разбираться!",
-]
-
 async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
         await update.message.reply_text("❗ Укажи название: `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN)
@@ -594,6 +671,79 @@ async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query
         await update.message.reply_text(random.choice(SHAME_RESPONSES))
         return
     await tmdb_search(update, query, "tv")
+
+# ─── TMDB CALLBACK (С ДЕТАЛЯМИ + SSPOISK ССЫЛКОЙ) ────────────────────────────
+async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает детали фильма/сериала + ссылку на sspoint"""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    media_type, tmdb_id = parts[1], parts[2]
+
+    try:
+        # Получаем детали + внешние ID (IMDB)
+        async with aiohttp.ClientSession() as s:
+            # Основные детали
+            async with s.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
+                params={"api_key": TMDB_KEY, "language": "ru-RU"}
+            ) as r:
+                detail = await r.json()
+            # Внешние ID (для получения IMDB ID)
+            async with s.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids",
+                params={"api_key": TMDB_KEY}
+            ) as r:
+                ext_ids = await r.json() if r.status == 200 else {}
+
+        imdb_id = ext_ids.get("imdb_id", "")
+
+        if media_type == "movie":
+            title = detail.get("title", "?")
+            year = (detail.get("release_date") or "")[:4]
+            icon = "🎬"
+            extra = ""
+        else:
+            title = detail.get("name", "?")
+            year = (detail.get("first_air_date") or "")[:4]
+            icon = "📺"
+            seasons = detail.get("number_of_seasons", "?")
+            episodes = detail.get("number_of_episodes", "?")
+            extra = f"\n📅 Сезонов: {seasons} | Серий: {episodes}"
+
+        orig_title = detail.get("original_title") or detail.get("original_name", "")
+        overview = detail.get("overview") or "Описание отсутствует"
+        rating = detail.get("vote_average", 0)
+        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
+        poster_path = detail.get("poster_path", "")
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+        # Создаём ссылку на sspoint
+        sspoint_url = make_sspoisk_link(media_type, int(tmdb_id), imdb_id)
+
+        text = (
+            f"{icon} *{title}*"
+            + (f" / {orig_title}" if orig_title and orig_title != title else "")
+            + f" ({year})\n\n"
+            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
+            f"🎭 Жанр: {genres}"
+            + extra
+            + f"\n\n📖 {overview[:500]}"
+            + f"\n\n🎥 *Смотреть бесплатно:*\n[sspoisk.ru]({sspoint_url})"
+        )
+
+        if poster_url:
+            await query.message.reply_photo(
+                photo=poster_url, 
+                caption=text, 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"TMDB callback: {e}")
+        await query.answer("❌ Ошибка.", show_alert=True)
 
 # ─── СОКРАЩЕНИЕ ССЫЛОК ────────────────────────────────────────────────────────
 async def flash_short(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None):
@@ -684,8 +834,15 @@ async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
+    user_id = update.effective_user.id
     raw = update.message.text.strip()
     text = raw.lower()
+
+    # 🔥 Если пользователь в режиме предложения — принимаем любой текст как идею
+    if user_id in pending_idea:
+        await flash_idea_receive(update, context)
+        return
 
     if text == "🎲 ролл":        await flash_roll(update, context); return
     elif text == "🪙 монетка":   await flash_coin(update, context); return
@@ -693,6 +850,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🌤 погода":    await update.message.reply_text("🌤 Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN); return
     elif text == "🎵 музыка":    await update.message.reply_text("🎵 Укажи: `флеш музыка Imagine Dragons`", parse_mode=ParseMode.MARKDOWN); return
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
+    elif text == "💡 предложить": await flash_idea_start(update, context); return
 
     # Авто-скачивание ссылки
     url = extract_url(raw)
@@ -724,62 +882,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "сократить": await flash_short(update, context, url=arg or None)
     elif cmd == "перевод":   await flash_translate(update, context, query=arg or None)
     elif cmd == "мем":       await flash_meme(update, context)
+    elif cmd == "предложить" or cmd == "идея":
+        await flash_idea_start(update, context)
     else:                    await flash_help(update, context)
 
-
-# ─── TMDB CALLBACK ────────────────────────────────────────────────────────────
-async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    parts = query.data.split(":")
-    media_type, tmdb_id = parts[1], parts[2]
-
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
-                params={"api_key": TMDB_KEY, "language": "ru-RU"}
-            ) as r:
-                detail = await r.json()
-
-        if media_type == "movie":
-            title = detail.get("title", "?")
-            year = (detail.get("release_date") or "")[:4]
-            icon = "🎬"
-            extra = ""
-        else:
-            title = detail.get("name", "?")
-            year = (detail.get("first_air_date") or "")[:4]
-            icon = "📺"
-            seasons = detail.get("number_of_seasons", "?")
-            episodes = detail.get("number_of_episodes", "?")
-            extra = f"\n📅 Сезонов: {seasons} | Серий: {episodes}"
-
-        orig_title = detail.get("original_title") or detail.get("original_name", "")
-        overview = detail.get("overview") or "Описание отсутствует"
-        rating = detail.get("vote_average", 0)
-        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
-        poster_path = detail.get("poster_path", "")
-        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
-
-        text = (
-            f"{icon} *{title}*"
-            + (f" / {orig_title}" if orig_title and orig_title != title else "")
-            + f" ({year})\n\n"
-            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
-            f"🎭 Жанр: {genres}"
-            + extra
-            + f"\n\n📖 {overview}"
-        )
-
-        if poster_url:
-            await query.message.reply_photo(photo=poster_url, caption=text, parse_mode=ParseMode.MARKDOWN)
-        else:
-            await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        await query.message.delete()
-    except Exception as e:
-        logger.error(f"TMDB callback: {e}")
-        await query.answer("❌ Ошибка.", show_alert=True)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
