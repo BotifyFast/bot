@@ -156,6 +156,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wav = os.path.join(tmpdir, "v.wav")
         await file.download_to_drive(ogg)
 
+        global _FFMPEG
         p = await asyncio.create_subprocess_exec(
             _FFMPEG, "-y", "-i", ogg, "-ar", "16000", "-ac", "1", "-f", "wav", wav,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
@@ -163,7 +164,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await p.wait()
         logger.info(f"Voice: wav exists={os.path.exists(wav)}, ffmpeg={_FFMPEG}")
 
-        # Отправляем wav в Google Speech API напрямую через requests
         import requests as _requests
         loop = asyncio.get_event_loop()
         def do_recognize():
@@ -201,16 +201,13 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 import shutil as _shutil
 
 def _find_ffmpeg():
-    # Сначала ищем в PATH
     p = _shutil.which("ffmpeg")
     if p: return p
-    # Пробуем imageio
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         pass
-    # Стандартные пути
     for path in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/store"]:
         import glob, os
         if os.path.exists(path): return path
@@ -243,14 +240,12 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 "extract_flat": "in_playlist",
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
-                # Пробуем сначала SoundCloud, при ошибке — YouTube
                 try:
                     info = ydl.extract_info(f"scsearch5:{query}", download=False)
                     if info and info.get("entries"):
                         return info, "sc"
                 except Exception:
                     pass
-                # Fallback на YouTube
                 info = ydl.extract_info(f"ytsearch5:{query}", download=False)
                 return info, "yt"
 
@@ -258,7 +253,7 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         info, source = await loop.run_in_executor(None, do_search)
 
         entries = info.get("entries", []) if info else []
-        entries = [e for e in entries if e]  # убираем None
+        entries = [e for e in entries if e]
         if not entries:
             await msg.edit_text("❌ Ничего не найдено.")
             return
@@ -294,7 +289,6 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     data = query.data
 
-    # ── МУЗЫКА ──
     if data.startswith("dl_music:"):
         parts = data.split(":")
         uid = int(parts[1])
@@ -350,7 +344,6 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
 
         return
 
-    # ── ПОЧТА (старый метод mail.tm) ──
     if data.startswith("check_mail:"):
         token = data.split(":", 1)[1]
         try:
@@ -597,24 +590,16 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Rate: {e}")
         await update.message.reply_text("❌ Ошибка получения курса.")
 
-# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ С ПОДМЕНОЙ ССЫЛКИ ──────────────────────────────
+# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ + ПОДМЕНА KINO → SS ────────────────────────────
 TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
-KINOPOISK_ID_PREFIX = "kp"  # префикс для ID Кинопоиска в TMDB
 
-def make_sspoisk_link(media_type: str, tmdb_id: int, imdb_id: str = None) -> str:
+def make_sspoisk_link(media_type: str, kp_id: int) -> str:
     """
-    Создаёт ссылку на sspoint (бесплатный просмотр).
-    Если есть IMDB ID — используем его, иначе пробуем TMDB ID.
+    Берём ID Кинопоиска и меняем kino на ss в ссылке.
+    Пример: kinopoisk.ru/series/859908/ → sspoint.ru/series/859908/
     """
-    # sspoint использует разные форматы для фильмов и сериалов
-    if media_type == "movie":
-        if imdb_id and imdb_id.startswith("tt"):
-            return f"https://www.sspoisk.ru/film/{imdb_id}/"
-        return f"https://www.sspoisk.ru/film/{tmdb_id}/"
-    else:
-        if imdb_id and imdb_id.startswith("tt"):
-            return f"https://www.sspoisk.ru/series/{imdb_id}/"
-        return f"https://www.sspoisk.ru/series/{tmdb_id}/"
+    section = "film" if media_type == "movie" else "series"
+    return f"https://www.sspoisk.ru/{section}/{kp_id}/"
 
 async def tmdb_search(update, query: str, media_type: str):
     """media_type: movie или tv"""
@@ -631,7 +616,6 @@ async def tmdb_search(update, query: str, media_type: str):
             await update.message.reply_text(f"❌ Ничего не найдено по запросу *{query}*.", parse_mode=ParseMode.MARKDOWN)
             return
 
-        # Показываем топ-5 результатов кнопками
         buttons = []
         for i, item in enumerate(results[:5]):
             if media_type == "movie":
@@ -672,24 +656,83 @@ async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query
         return
     await tmdb_search(update, query, "tv")
 
-# ─── TMDB CALLBACK (С ДЕТАЛЯМИ + SSPOISK ССЫЛКОЙ) ────────────────────────────
+# ─── TMDB CALLBACK (ДЕТАЛИ + ССЫЛКА SSPOISK через ID Кинопоиска) ─────────────
+KINOPOISK_API_KEY = "c2b2631749aead62cfdc86b394e6399f"  # Запасной ключ, используется OpenWeather
+
+async def get_kinopoisk_id_from_imdb(imdb_id: str) -> int | None:
+    """Получает ID Кинопоиска по IMDB ID через неофициальный API"""
+    if not imdb_id or not imdb_id.startswith("tt"):
+        return None
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Пробуем через kinopoiskapiunofficial
+            async with s.get(
+                f"https://kinopoiskapiunofficial.tech/api/v2.2/films?imdbId={imdb_id}",
+                headers={"X-API-KEY": "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5"}
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    items = data.get("items", [])
+                    if items:
+                        return items[0].get("kinopoiskId")
+        return None
+    except Exception as e:
+        logger.error(f"Kinopoisk API: {e}")
+        return None
+
+async def get_kinopoisk_id_direct(tmdb_id: int, media_type: str) -> int | None:
+    """Ищет ID Кинопоиска напрямую через их поиск по TMDB ID"""
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Пробуем поиск по названию через неофициальный API
+            # Сначала получим название из TMDB
+            async with s.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
+                params={"api_key": TMDB_KEY, "language": "ru-RU"}
+            ) as r:
+                if r.status != 200:
+                    return None
+                detail = await r.json()
+
+            title_ru = detail.get("title") or detail.get("name", "")
+            year = (detail.get("release_date") or detail.get("first_air_date") or "")[:4]
+
+            if not title_ru:
+                return None
+
+            # Ищем на Кинопоиске
+            async with s.get(
+                f"https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword",
+                params={"keyword": f"{title_ru} {year}"},
+                headers={"X-API-KEY": "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5"}
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    films = data.get("films", [])
+                    if films:
+                        return films[0].get("filmId")
+        return None
+    except Exception as e:
+        logger.error(f"Kinopoisk search: {e}")
+        return None
+
 async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает детали фильма/сериала + ссылку на sspoint"""
+    """Показывает детали фильма/сериала + ссылку на sspoint (kino → ss)"""
     query = update.callback_query
     await query.answer()
     parts = query.data.split(":")
     media_type, tmdb_id = parts[1], parts[2]
 
     try:
-        # Получаем детали + внешние ID (IMDB)
         async with aiohttp.ClientSession() as s:
-            # Основные детали
+            # Основные детали из TMDB
             async with s.get(
                 f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
                 params={"api_key": TMDB_KEY, "language": "ru-RU"}
             ) as r:
                 detail = await r.json()
-            # Внешние ID (для получения IMDB ID)
+
+            # Внешние ID (IMDB)
             async with s.get(
                 f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids",
                 params={"api_key": TMDB_KEY}
@@ -697,6 +740,11 @@ async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ext_ids = await r.json() if r.status == 200 else {}
 
         imdb_id = ext_ids.get("imdb_id", "")
+
+        # Пытаемся получить ID Кинопоиска
+        kp_id = await get_kinopoisk_id_from_imdb(imdb_id)
+        if not kp_id:
+            kp_id = await get_kinopoisk_id_direct(int(tmdb_id), media_type)
 
         if media_type == "movie":
             title = detail.get("title", "?")
@@ -718,8 +766,12 @@ async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poster_path = detail.get("poster_path", "")
         poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
 
-        # Создаём ссылку на sspoint
-        sspoint_url = make_sspoisk_link(media_type, int(tmdb_id), imdb_id)
+        # Создаём ссылку на sspoint (меняем kino → ss)
+        if kp_id:
+            sspoint_url = make_sspoisk_link(media_type, kp_id)
+            watch_text = f"\n\n🎥 *Смотреть бесплатно:*\n[{sspoint_url}]({sspoint_url})"
+        else:
+            watch_text = "\n\n⚠️ *Ссылка на sspoint не найдена* (не удалось получить ID Кинопоиска)"
 
         text = (
             f"{icon} *{title}*"
@@ -729,13 +781,13 @@ async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎭 Жанр: {genres}"
             + extra
             + f"\n\n📖 {overview[:500]}"
-            + f"\n\n🎥 *Смотреть бесплатно:*\n[sspoisk.ru]({sspoint_url})"
+            + watch_text
         )
 
         if poster_url:
             await query.message.reply_photo(
-                photo=poster_url, 
-                caption=text, 
+                photo=poster_url,
+                caption=text,
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
@@ -786,14 +838,12 @@ async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
 
 # ─── МЕМ ──────────────────────────────────────────────────────────────────────
 async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Берём мемы с Pikabu через RSS
     try:
         async with aiohttp.ClientSession() as s:
             headers = {"User-Agent": "Mozilla/5.0"}
             async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
                 html = await r.text()
 
-        # Парсим картинки из Pikabu
         import re as _re
         imgs = _re.findall(r'data-large-image="([^"]+)"', html)
         if not imgs:
@@ -806,7 +856,6 @@ async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise Exception("No images found")
     except Exception as e:
         logger.error(f"Meme pikabu: {e}")
-        # Fallback — мемы с русских реддитов через API
         try:
             ru_subs = ["ru_memes", "RusMemes", "Pikabu"]
             async with aiohttp.ClientSession() as s:
@@ -839,7 +888,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     text = raw.lower()
 
-    # 🔥 Если пользователь в режиме предложения — принимаем любой текст как идею
+    # Если пользователь в режиме предложения — принимаем любой текст как идею
     if user_id in pending_idea:
         await flash_idea_receive(update, context)
         return
