@@ -29,7 +29,7 @@ from telegram.constants import ChatType, ParseMode
 
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
-OWNER_ID = 123456789  # ← ЗАМЕНИ НА СВОЙ TELEGRAM ID!
+OWNER_ID = 1202730193  # ← ЗАМЕНИ НА СВОЙ TELEGRAM ID!
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -511,44 +511,64 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Rate: {e}")
         await update.message.reply_text("❌ Ошибка получения курса.")
 
-# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ (TMDB → парсинг sspoint) ───────────────────────
+# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ (TMDB → Кинопоиск ID → fbsite.sbs) ────────────
 TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
 
-async def search_sspoint(title: str, year: str, media_type: str) -> str | None:
-    """Ищет фильм/сериал на sspoint.ru и возвращает ссылку"""
+# ОДИН ключ Кинопоиска (500 запросов/сутки) — используется только для получения ID
+KP_API_KEY = "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5"
+
+async def get_kinopoisk_id_from_tmdb(tmdb_id: str, media_type: str, title: str, year: str) -> str | None:
+    """
+    Получает ID Кинопоиска.
+    Сначала пробует через IMDB ID из TMDB, потом через поиск по названию.
+    """
     try:
-        # Очищаем название от спецсимволов для поиска
-        clean_title = re.sub(r'[^\w\s]', '', title).strip()
-        search_url = f"https://www.sspoisk.ru/search/?q={clean_title}+{year}"
-
         async with aiohttp.ClientSession() as s:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with s.get(search_url, headers=headers, timeout=10) as r:
-                if r.status != 200:
-                    return None
-                html = await r.text()
+            # Шаг 1: получаем IMDB ID из TMDB
+            async with s.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids",
+                params={"api_key": TMDB_KEY}
+            ) as r:
+                if r.status == 200:
+                    ext_ids = await r.json()
+                    imdb_id = ext_ids.get("imdb_id", "")
 
-        # Ищем ссылки на фильмы/сериалы
-        section = "film" if media_type == "movie" else "series"
-        pattern = rf'href="(/{section}/\d+/)"'
-        matches = re.findall(pattern, html)
+                    # Шаг 2: по IMDB ID получаем ID Кинопоиска
+                    if imdb_id and imdb_id.startswith("tt"):
+                        async with s.get(
+                            "https://kinopoiskapiunofficial.tech/api/v2.2/films",
+                            params={"imdbId": imdb_id},
+                            headers={"X-API-KEY": KP_API_KEY}
+                        ) as r2:
+                            if r2.status == 200:
+                                data = await r2.json()
+                                items = data.get("items", [])
+                                if items:
+                                    kp_id = items[0].get("kinopoiskId")
+                                    if kp_id:
+                                        return str(kp_id)
 
-        if matches:
-            return f"https://www.sspoisk.ru{matches[0]}"
-
-        # Запасной вариант — любые ссылки
-        pattern_all = r'href="(/(?:film|series)/\d+/)"'
-        matches_all = re.findall(pattern_all, html)
-        if matches_all:
-            return f"https://www.sspoisk.ru{matches_all[0]}"
+            # Шаг 3: если не получилось — ищем по названию
+            clean_title = title.split(" / ")[0].split(" (")[0].strip()
+            async with s.get(
+                "https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword",
+                params={"keyword": f"{clean_title} {year}"},
+                headers={"X-API-KEY": KP_API_KEY}
+            ) as r3:
+                if r3.status == 200:
+                    data = await r3.json()
+                    films = data.get("films", [])
+                    if films:
+                        # Берём первый результат
+                        return str(films[0].get("filmId"))
 
         return None
     except Exception as e:
-        logger.error(f"sspoint search: {e}")
+        logger.error(f"Get KP ID: {e}")
         return None
 
 async def search_movie_tv(update, query: str, media_type: str):
-    """Поиск через TMDB + пытается найти ссылку на sspoint"""
+    """Поиск через TMDB"""
     msg = await update.message.reply_text(f"🔍 Ищу *{query}*...", parse_mode=ParseMode.MARKDOWN)
 
     try:
@@ -574,7 +594,9 @@ async def search_movie_tv(update, query: str, media_type: str):
                 year = (item.get("first_air_date") or "")[:4]
             rating = item.get("vote_average", 0)
             label = f"{i+1}. {title[:35]} ({year}) ⭐{rating:.1f}"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"movie:{media_type}:{item['id']}:{title}:{year}")])
+            # Кодируем title чтобы избежать проблем с двоеточиями
+            safe_title = title.replace(":", "：")
+            buttons.append([InlineKeyboardButton(label, callback_data=f"movie:{media_type}:{item['id']}:{safe_title}:{year}")])
 
         type_name = "🎬 Фильмы" if media_type == "movie" else "📺 Сериалы"
         await msg.edit_text(
@@ -604,16 +626,21 @@ async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query
         return
     await search_movie_tv(update, query, "tv")
 
-# ─── MOVIE CALLBACK (ДЕТАЛИ + ССЫЛКА SSPOISK) ────────────────────────────────
+# ─── MOVIE CALLBACK (ДЕТАЛИ + ССЫЛКА НА fbsite.sbs) ──────────────────────────
 async def movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает детали фильма/сериала + ищет ссылку на sspoint"""
+    """Показывает детали + получает ID Кинопоиска и делает ссылку на fbsite.sbs"""
     query = update.callback_query
     await query.answer()
-    parts = query.data.split(":", 3)
-    media_type, tmdb_id, title_encoded, year = parts[1], parts[2], parts[3], parts[4] if len(parts) > 4 else ""
-
-    # Декодируем название (могло сломаться из-за двоеточий)
-    title_from_callback = title_encoded
+    
+    try:
+        parts = query.data.split(":", 4)
+        media_type = parts[1]
+        tmdb_id = parts[2]
+        title_from_cb = parts[3] if len(parts) > 3 else ""
+        year_from_cb = parts[4] if len(parts) > 4 else ""
+    except:
+        await query.message.edit_text("❌ Ошибка данных.")
+        return
 
     try:
         async with aiohttp.ClientSession() as s:
@@ -625,13 +652,13 @@ async def movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 detail = await r.json()
 
         if media_type == "movie":
-            title = detail.get("title", title_from_callback or "?")
-            year_val = (detail.get("release_date") or year or "")[:4]
+            title = detail.get("title", title_from_cb or "?")
+            year_val = (detail.get("release_date") or year_from_cb or "")[:4]
             icon = "🎬"
             extra = ""
         else:
-            title = detail.get("name", title_from_callback or "?")
-            year_val = (detail.get("first_air_date") or year or "")[:4]
+            title = detail.get("name", title_from_cb or "?")
+            year_val = (detail.get("first_air_date") or year_from_cb or "")[:4]
             icon = "📺"
             seasons = detail.get("number_of_seasons", "?")
             episodes = detail.get("number_of_episodes", "?")
@@ -644,18 +671,16 @@ async def movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poster_path = detail.get("poster_path", "")
         poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else ""
 
-        # Ищем ссылку на sspoint
-        await query.message.edit_text(f"🔗 Ищу ссылку на sspoint...")
-        ss_url = await search_sspoint(title, year_val, media_type)
+        # Получаем ID Кинопоиска
+        await query.message.edit_text("🔗 Получаю ссылку...")
+        kp_id = await get_kinopoisk_id_from_tmdb(tmdb_id, media_type, title, year_val)
 
-        if ss_url:
-            watch_text = f"\n\n🎥 *Смотреть бесплатно:*\n[{ss_url}]({ss_url})"
+        if kp_id:
+            section = "film" if media_type == "movie" else "series"
+            watch_url = f"https://fbsite.sbs/{section}/{kp_id}/"
+            watch_text = f"\n\n🎥 *Смотреть бесплатно:*\n[{watch_url}]({watch_url})"
         else:
-            # Запасной вариант — пробуем заменить kinopoisk → sspoint
-            # Может сработать если ID совпадают
-            fake_kp_url = f"https://www.kinopoisk.ru/{'film' if media_type == 'movie' else 'series'}/{tmdb_id}/"
-            ss_url_fallback = fake_kp_url.replace("kinopoisk", "sspoisk")
-            watch_text = f"\n\n🎥 *Смотреть (пробная ссылка):*\n[{ss_url_fallback}]({ss_url_fallback})"
+            watch_text = "\n\n⚠️ *Не удалось получить ссылку.*"
 
         text = (
             f"{icon} *{title}*"
@@ -826,7 +851,7 @@ def main():
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
     app.add_handler(CallbackQueryHandler(movie_callback, pattern="^movie:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("⚡ Flash Bot запущен! (TMDB + sspoint парсинг)")
+    logger.info("⚡ Flash Bot запущен! (TMDB → KP ID → fbsite.sbs)")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     port = int(os.environ.get("PORT", 8443))
