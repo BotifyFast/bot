@@ -599,7 +599,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd in ("предложить", "идея"): await flash_idea_start(update, context)
     else: await flash_help(update, context)
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ─── MAIN (исправленный) ─────────────────────────────────────────────────────
 def main():
     import requests
     try: requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=5)
@@ -616,16 +616,17 @@ def main():
 
     async def error_handler(update, context):
         logger.error(f"Error: {context.error}")
-        if "Conflict" in str(context.error): await asyncio.sleep(5)
+        if "Conflict" in str(context.error):
+            await asyncio.sleep(5)
 
     app.add_error_handler(error_handler)
 
-    # Инициализируем Telethon
-    async def startup():
+    # Инициализируем Telethon при запуске
+    async def post_init(app):
         await init_telethon()
         logger.info("⚡ Flash Bot запущен!")
 
-    app.post_init = startup
+    app.post_init = post_init
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     port = int(os.environ.get("PORT", "8443"))
