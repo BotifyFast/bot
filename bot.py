@@ -29,7 +29,15 @@ from telegram.constants import ChatType, ParseMode
 
 TOKEN = "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g"
 WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
-OWNER_ID = 123456789  # ← ЗАМЕНИ НА СВОЙ TELEGRAM ID! Узнать: @userinfobot
+OWNER_ID = 123456789  # ← ЗАМЕНИ НА СВОЙ TELEGRAM ID!
+
+# Ключи для Кинопоиск API (основной + запасные, 500 запросов/сутки каждый)
+KP_API_KEYS = [
+    "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5",  # основной
+    # Добавь запасные ключи если есть:
+    # "ещё-один-ключ-если-закончатся-запросы",
+]
+kp_key_index = 0  # текущий индекс ключа
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,12 +45,9 @@ logger = logging.getLogger(__name__)
 SUPPORTED_DOMAINS = ["youtube.com","youtu.be","tiktok.com","vm.tiktok.com","instagram.com","instagr.am","soundcloud.com","twitter.com","x.com","vk.com","facebook.com","fb.watch"]
 URL_REGEX = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
-# Хранилище: pending_music[user_id] = [(title, url, duration), ...]
 pending_music = {}
-# Хранилище для предложений: кто сейчас вводит идею
 pending_idea = set()
 
-# Список стыдных ответов для фильмов/сериалов 18+
 BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
 SHAME_RESPONSES = [
     "🫣 АЙ-АЙ-АЙ! Иди лучше Машу и Медведя смотри!",
@@ -74,6 +79,47 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True, is_persistent=True
 )
 
+# ─── КИНОПОИСК API (ротация ключей) ──────────────────────────────────────────
+def get_kp_key():
+    """Возвращает текущий API ключ Кинопоиска"""
+    global kp_key_index
+    return KP_API_KEYS[kp_key_index]
+
+def switch_kp_key():
+    """Переключает на следующий ключ если закончились запросы"""
+    global kp_key_index
+    kp_key_index = (kp_key_index + 1) % len(KP_API_KEYS)
+    logger.info(f"Переключились на ключ #{kp_key_index + 1}")
+
+async def kp_api_request(url: str, params: dict = None) -> dict | None:
+    """Запрос к Кинопоиск API с авто-переключением ключей при ошибке 402"""
+    for attempt in range(len(KP_API_KEYS)):
+        key = get_kp_key()
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    url,
+                    params=params,
+                    headers={"X-API-KEY": key}
+                ) as r:
+                    if r.status == 402:
+                        # Закончились запросы — пробуем следующий ключ
+                        logger.warning(f"Ключ #{kp_key_index + 1} исчерпан (402)")
+                        switch_kp_key()
+                        continue
+                    if r.status == 404:
+                        return None
+                    if r.status == 200:
+                        return await r.json()
+                    logger.error(f"KP API error: {r.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"KP API request: {e}")
+            return None
+    logger.error("Все ключи исчерпаны!")
+    return None
+
+# ─── СТАРТ / ХЕЛП ────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚡ *Привет! Я Flash Bot!*\n\n"
@@ -162,7 +208,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
         await p.wait()
-        logger.info(f"Voice: wav exists={os.path.exists(wav)}, ffmpeg={_FFMPEG}")
 
         import requests as _requests
         loop = asyncio.get_event_loop()
@@ -197,7 +242,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ─── МУЗЫКА: ПОИСК 5 ТРЕКОВ ───────────────────────────────────────────────────
+# ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
 import shutil as _shutil
 
 def _find_ffmpeg():
@@ -206,8 +251,7 @@ def _find_ffmpeg():
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        pass
+    except: pass
     for path in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/store"]:
         import glob, os
         if os.path.exists(path): return path
@@ -219,9 +263,7 @@ _FFMPEG = _find_ffmpeg()
 print(f"ffmpeg path: {_FFMPEG}")
 
 SC_OPTS_BASE = {
-    "quiet": True,
-    "ffmpeg_location": _FFMPEG,
-    "no_warnings": True,
+    "quiet": True, "ffmpeg_location": _FFMPEG, "no_warnings": True,
     "http_headers": {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://soundcloud.com/",
@@ -233,31 +275,22 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
     msg = await update.message.reply_text(f"🔍 Ищу *{query}*...", parse_mode=ParseMode.MARKDOWN)
     try:
         import yt_dlp
-
         def do_search():
-            opts = {
-                **SC_OPTS_BASE,
-                "extract_flat": "in_playlist",
-            }
+            opts = {**SC_OPTS_BASE, "extract_flat": "in_playlist"}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 try:
                     info = ydl.extract_info(f"scsearch5:{query}", download=False)
-                    if info and info.get("entries"):
-                        return info, "sc"
-                except Exception:
-                    pass
+                    if info and info.get("entries"): return info, "sc"
+                except: pass
                 info = ydl.extract_info(f"ytsearch5:{query}", download=False)
                 return info, "yt"
-
         loop = asyncio.get_event_loop()
         info, source = await loop.run_in_executor(None, do_search)
-
         entries = info.get("entries", []) if info else []
         entries = [e for e in entries if e]
         if not entries:
             await msg.edit_text("❌ Ничего не найдено.")
             return
-
         uid = update.effective_user.id
         results = []
         buttons = []
@@ -270,10 +303,8 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
             results.append({"title": title, "url": url, "duration": dur})
             label = f"{src_icon} {i+1}. {title[:38]} ({mins}:{secs:02d})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"dl_music:{uid}:{i}")])
-
         pending_music[uid] = results
         src_name = "SoundCloud" if source == "sc" else "YouTube"
-
         await msg.edit_text(
             f"🎵 Найдено на *{src_name}* по запросу *{query}*:\n\nВыбери трек:",
             parse_mode=ParseMode.MARKDOWN,
@@ -283,7 +314,6 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.error(f"Music search: {e}")
         await msg.edit_text("❌ Ошибка поиска. Попробуй позже.")
 
-# ─── СКАЧАТЬ ВЫБРАННЫЙ ТРЕК ───────────────────────────────────────────────────
 async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -293,55 +323,40 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
         parts = data.split(":")
         uid = int(parts[1])
         idx = int(parts[2])
-
         tracks = pending_music.get(uid)
         if not tracks or idx >= len(tracks):
             await query.message.edit_text("❌ Сессия устарела. Повтори поиск.")
             return
-
         track = tracks[idx]
         title = track["title"]
         url = track["url"]
         duration = track["duration"]
-
         await query.message.edit_text(f"⬇️ Скачиваю *{title}*...", parse_mode=ParseMode.MARKDOWN)
-
         tmpdir = tempfile.mkdtemp()
         try:
             import yt_dlp
             output_template = os.path.join(tmpdir, "%(title)s.%(ext)s")
             ydl_opts = {
-                **SC_OPTS_BASE,
-                "format": "bestaudio/best",
-                "outtmpl": output_template,
+                **SC_OPTS_BASE, "format": "bestaudio/best", "outtmpl": output_template,
                 "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
             }
-
             def do_dl():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
-
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, do_dl)
-
             mp3_files = list(Path(tmpdir).glob("*.mp3"))
-            if not mp3_files:
-                raise FileNotFoundError("MP3 не найден")
-
+            if not mp3_files: raise FileNotFoundError("MP3 не найден")
             await query.message.edit_text(f"📤 Отправляю *{title}*...", parse_mode=ParseMode.MARKDOWN)
-
             async with aiofiles.open(mp3_files[0], "rb") as f:
                 audio_data = await f.read()
-
             await query.message.reply_audio(audio=audio_data, title=title, duration=duration, caption=f"🎵 {title}")
             await query.message.delete()
-
         except Exception as e:
             logger.error(f"Music dl: {e}")
             await query.message.edit_text("❌ Не удалось скачать трек.")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-
         return
 
     if data.startswith("check_mail:"):
@@ -367,11 +382,10 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"Mail check: {e}")
             await query.answer("❌ Ошибка.", show_alert=True)
-
     elif data.startswith("delete_mail:"):
         await query.message.edit_text("🗑 Почта удалена.")
 
-# ─── ВРЕМЕННАЯ ПОЧТА через guerrillamail ──────────────────────────────────────
+# ─── ВРЕМЕННАЯ ПОЧТА ─────────────────────────────────────────────────────────
 async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update):
         await update.message.reply_text("📧 Временная почта — только в личке.")
@@ -383,26 +397,19 @@ async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data = await r.json()
                 email = data["email_addr"]
                 sid_token = data["sid_token"]
-
         await msg.edit_text(
-            f"📧 *Временная почта готова!*\n\n"
-            f"📮 Адрес: `{email}`\n"
-            f"⏰ Работает 10 минут\n\n"
-            f"Нажми кнопку чтобы проверить письма:",
+            f"📧 *Временная почта готова!*\n\n📮 Адрес: `{email}`\n⏰ Работает 10 минут\n\nНажми кнопку чтобы проверить письма:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📥 Проверить письма", callback_data=f"gm_check:{sid_token}")],
                 [InlineKeyboardButton("🗑 Закрыть", callback_data="gm_delete")]
             ])
         )
-
         async def auto_expire():
             await asyncio.sleep(600)
-            try:
-                await msg.edit_text(f"⏰ *Почта истекла*\n\n`{email}`", parse_mode=ParseMode.MARKDOWN)
+            try: await msg.edit_text(f"⏰ *Почта истекла*\n\n`{email}`", parse_mode=ParseMode.MARKDOWN)
             except: pass
         asyncio.create_task(auto_expire())
-
     except Exception as e:
         logger.error(f"Mail: {e}")
         await msg.edit_text("❌ Ошибка создания почты.")
@@ -411,7 +418,6 @@ async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     data = query.data
-
     if data.startswith("gm_check:"):
         sid = data.split(":", 1)[1]
         try:
@@ -435,68 +441,44 @@ async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             logger.error(f"Guerrilla check: {e}")
             await query.answer("❌ Ошибка.", show_alert=True)
-
     elif data == "gm_delete":
         await query.message.edit_text("🗑 Почта закрыта.")
 
-# ─── ПРЕДЛОЖЕНИЯ / ИДЕИ 💡 ────────────────────────────────────────────────────
+# ─── ПРЕДЛОЖЕНИЯ ─────────────────────────────────────────────────────────────
 async def flash_idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Активирует режим ввода предложения"""
     user_id = update.effective_user.id
     pending_idea.add(user_id)
     await update.message.reply_text(
-        "💡 *Жду твою идею!*\n\n"
-        "Напиши одним сообщением, что бы ты хотел добавить или изменить в боте.\n"
-        "Для отмены напиши `отмена`.",
+        "💡 *Жду твою идею!*\n\nНапиши одним сообщением, что бы ты хотел добавить или изменить в боте.\nДля отмены напиши `отмена`.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def flash_idea_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает текст предложения"""
     user_id = update.effective_user.id
     user = update.effective_user
     text = update.message.text.strip()
-
     if text.lower() == "отмена":
         pending_idea.discard(user_id)
         await update.message.reply_text("❌ Отменено.")
         return
-
-    # Формируем запись
     name = user.full_name
     username = f"@{user.username}" if user.username else "нет username"
-    idea_text = (
-        f"\n{'='*50}\n"
-        f"💡 НОВАЯ ИДЕЯ\n"
-        f"От: {name} ({username}) | ID: {user_id}\n"
-        f"Дата: {update.message.date}\n"
-        f"{'='*50}\n"
-        f"{text}\n"
-    )
-
-    # Сохраняем в файл
+    idea_text = f"\n{'='*50}\n💡 НОВАЯ ИДЕЯ\nОт: {name} ({username}) | ID: {user_id}\nДата: {update.message.date}\n{'='*50}\n{text}\n"
     try:
         with open("ideas.txt", "a", encoding="utf-8") as f:
             f.write(idea_text)
         logger.info(f"Идея сохранена от {user_id}")
     except Exception as e:
         logger.error(f"Ошибка сохранения идеи: {e}")
-
-    # Отправляем владельцу в личку
     try:
-        owner_msg = (
-            f"💡 *Новая идея!*\n\n"
-            f"👤 {name} (`{user_id}`)\n"
-            f"📝 {text}"
-        )
+        owner_msg = f"💡 *Новая идея!*\n\n👤 {name} (`{user_id}`)\n📝 {text}"
         await context.bot.send_message(OWNER_ID, owner_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Не удалось отправить идею владельцу: {e}")
-
     pending_idea.discard(user_id)
     await update.message.reply_text("✅ *Спасибо! Идея отправлена.*", parse_mode=ParseMode.MARKDOWN)
 
-# ─── СКАЧАТЬ ВИДЕО ПО ССЫЛКЕ ──────────────────────────────────────────────────
+# ─── СКАЧАТЬ ВИДЕО ───────────────────────────────────────────────────────────
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     audio_only = is_audio_url(url)
     msg = await update.message.reply_text("⬇️ Скачиваю...")
@@ -507,8 +489,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         if audio_only:
             ydl_opts = {
                 "format": "bestaudio/best", "outtmpl": output_template,
-                "quiet": True, "no_warnings": True,
-                "ffmpeg_location": _FFMPEG,
+                "quiet": True, "no_warnings": True, "ffmpeg_location": _FFMPEG,
                 "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
                 "max_filesize": 48 * 1024 * 1024,
             }
@@ -519,21 +500,16 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
                 "merge_output_format": "mp4", "max_filesize": 48 * 1024 * 1024,
                 "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
             }
-
         def do_dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(url, download=True)
-
         loop = asyncio.get_event_loop()
         info = await loop.run_in_executor(None, do_dl)
         if info and "entries" in info:
             info = info["entries"][0]
-
         title = info.get("title", "Файл") if info else "Файл"
         duration = int(info.get("duration") or 0) if info else 0
-
         await msg.edit_text(f"📤 Отправляю *{title}*...", parse_mode=ParseMode.MARKDOWN)
-
         if audio_only:
             files = list(Path(tmpdir).glob("*.mp3"))
             if not files: raise FileNotFoundError("MP3 не найден")
@@ -557,7 +533,6 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
                 supports_streaming=True
             )
         await msg.delete()
-
     except Exception as e:
         logger.error(f"Video dl: {e}")
         err = str(e).lower()
@@ -570,7 +545,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ─── КУРС ВАЛЮТ ───────────────────────────────────────────────────────────────
+# ─── КУРС ВАЛЮТ ──────────────────────────────────────────────────────────────
 async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with aiohttp.ClientSession() as s:
@@ -590,53 +565,55 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Rate: {e}")
         await update.message.reply_text("❌ Ошибка получения курса.")
 
-# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ + ПОДМЕНА KINO → SS ────────────────────────────
-TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
+# ─── ПОИСК ФИЛЬМОВ / СЕРИАЛОВ ЧЕРЕЗ КИНОПОИСК API ────────────────────────────
+async def kp_search(update, query: str, media_type: str):
+    """Ищет фильмы/сериалы через Кинопоиск API"""
+    msg = await update.message.reply_text(f"🔍 Ищу на Кинопоиске *{query}*...", parse_mode=ParseMode.MARKDOWN)
 
-def make_sspoisk_link(media_type: str, kp_id: int) -> str:
-    """
-    Берём ID Кинопоиска и меняем kino на ss в ссылке.
-    Пример: kinopoisk.ru/series/859908/ → sspoint.ru/series/859908/
-    """
-    section = "film" if media_type == "movie" else "series"
-    return f"https://www.sspoisk.ru/{section}/{kp_id}/"
+    data = await kp_api_request(
+        "https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword",
+        {"keyword": query}
+    )
 
-async def tmdb_search(update, query: str, media_type: str):
-    """media_type: movie или tv"""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.themoviedb.org/3/search/{media_type}",
-                params={"api_key": TMDB_KEY, "query": query, "language": "ru-RU"}
-            ) as r:
-                search = await r.json()
+    if not data:
+        await msg.edit_text("❌ Ошибка поиска или закончились запросы API.")
+        return
 
-        results = search.get("results", [])
-        if not results:
-            await update.message.reply_text(f"❌ Ничего не найдено по запросу *{query}*.", parse_mode=ParseMode.MARKDOWN)
-            return
+    films = data.get("films", [])
+    if not films:
+        await msg.edit_text(f"❌ Ничего не найдено по запросу *{query}*.", parse_mode=ParseMode.MARKDOWN)
+        return
 
-        buttons = []
-        for i, item in enumerate(results[:5]):
-            if media_type == "movie":
-                title = item.get("title", "?")
-                year = (item.get("release_date") or "")[:4]
-            else:
-                title = item.get("name", "?")
-                year = (item.get("first_air_date") or "")[:4]
-            rating = item.get("vote_average", 0)
-            label = f"{i+1}. {title[:35]} ({year}) ⭐{rating:.1f}"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"tmdb:{media_type}:{item['id']}")])
+    # Фильтруем по типу (если указан)
+    if media_type == "movie":
+        # Кинопоиск: type = "FILM" или "VIDEO"
+        films = [f for f in films if f.get("type") in ("FILM", "VIDEO")]
+    elif media_type == "tv":
+        # Кинопоиск: type = "TV_SERIES" или "MINI_SERIES" или "TV_SHOW"
+        films = [f for f in films if f.get("type") in ("TV_SERIES", "MINI_SERIES", "TV_SHOW")]
 
-        type_name = "🎬 Фильмы" if media_type == "movie" else "📺 Сериалы"
-        await update.message.reply_text(
-            f"{type_name} по запросу *{query}*:\n\nВыбери:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-    except Exception as e:
-        logger.error(f"TMDB search: {e}")
-        await update.message.reply_text("❌ Ошибка поиска.")
+    if not films:
+        await msg.edit_text(f"❌ Ничего не найдено.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # Показываем топ-5 результатов
+    buttons = []
+    for i, film in enumerate(films[:5]):
+        title_ru = film.get("nameRu") or "?"
+        title_en = film.get("nameEn") or ""
+        year = film.get("year") or "????"
+        rating = film.get("rating") or "?"
+        film_id = film.get("filmId")
+
+        label = f"{i+1}. {title_ru[:35]} ({year}) ⭐{rating}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"kp:{media_type}:{film_id}")])
+
+    type_name = "🎬 Фильмы" if media_type == "movie" else "📺 Сериалы"
+    await msg.edit_text(
+        f"{type_name} по запросу *{query}*:\n\nВыбери:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
@@ -645,7 +622,7 @@ async def flash_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, query:
     if any(w in query.lower() for w in BAD_WORDS):
         await update.message.reply_text(random.choice(SHAME_RESPONSES))
         return
-    await tmdb_search(update, query, "movie")
+    await kp_search(update, query, "movie")
 
 async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
@@ -654,134 +631,52 @@ async def flash_series(update: Update, context: ContextTypes.DEFAULT_TYPE, query
     if any(w in query.lower() for w in BAD_WORDS):
         await update.message.reply_text(random.choice(SHAME_RESPONSES))
         return
-    await tmdb_search(update, query, "tv")
+    await kp_search(update, query, "tv")
 
-# ─── TMDB CALLBACK (ДЕТАЛИ + ССЫЛКА SSPOISK через ID Кинопоиска) ─────────────
-KINOPOISK_API_KEY = "c2b2631749aead62cfdc86b394e6399f"  # Запасной ключ, используется OpenWeather
-
-async def get_kinopoisk_id_from_imdb(imdb_id: str) -> int | None:
-    """Получает ID Кинопоиска по IMDB ID через неофициальный API"""
-    if not imdb_id or not imdb_id.startswith("tt"):
-        return None
-    try:
-        async with aiohttp.ClientSession() as s:
-            # Пробуем через kinopoiskapiunofficial
-            async with s.get(
-                f"https://kinopoiskapiunofficial.tech/api/v2.2/films?imdbId={imdb_id}",
-                headers={"X-API-KEY": "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5"}
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    items = data.get("items", [])
-                    if items:
-                        return items[0].get("kinopoiskId")
-        return None
-    except Exception as e:
-        logger.error(f"Kinopoisk API: {e}")
-        return None
-
-async def get_kinopoisk_id_direct(tmdb_id: int, media_type: str) -> int | None:
-    """Ищет ID Кинопоиска напрямую через их поиск по TMDB ID"""
-    try:
-        async with aiohttp.ClientSession() as s:
-            # Пробуем поиск по названию через неофициальный API
-            # Сначала получим название из TMDB
-            async with s.get(
-                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
-                params={"api_key": TMDB_KEY, "language": "ru-RU"}
-            ) as r:
-                if r.status != 200:
-                    return None
-                detail = await r.json()
-
-            title_ru = detail.get("title") or detail.get("name", "")
-            year = (detail.get("release_date") or detail.get("first_air_date") or "")[:4]
-
-            if not title_ru:
-                return None
-
-            # Ищем на Кинопоиске
-            async with s.get(
-                f"https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword",
-                params={"keyword": f"{title_ru} {year}"},
-                headers={"X-API-KEY": "8da8c0ef-16b1-4c7b-b3c4-7b17d2c1c8c5"}
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    films = data.get("films", [])
-                    if films:
-                        return films[0].get("filmId")
-        return None
-    except Exception as e:
-        logger.error(f"Kinopoisk search: {e}")
-        return None
-
-async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает детали фильма/сериала + ссылку на sspoint (kino → ss)"""
+# ─── KP CALLBACK (ДЕТАЛИ + ССЫЛКА SSPOISK) ───────────────────────────────────
+async def kp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает детали с Кинопоиска + ссылку на sspoint (kino → ss)"""
     query = update.callback_query
     await query.answer()
     parts = query.data.split(":")
-    media_type, tmdb_id = parts[1], parts[2]
+    media_type, film_id = parts[1], parts[2]
 
     try:
-        async with aiohttp.ClientSession() as s:
-            # Основные детали из TMDB
-            async with s.get(
-                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
-                params={"api_key": TMDB_KEY, "language": "ru-RU"}
-            ) as r:
-                detail = await r.json()
+        # Получаем детали фильма
+        data = await kp_api_request(f"https://kinopoiskapiunofficial.tech/api/v2.2/films/{film_id}")
 
-            # Внешние ID (IMDB)
-            async with s.get(
-                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids",
-                params={"api_key": TMDB_KEY}
-            ) as r:
-                ext_ids = await r.json() if r.status == 200 else {}
+        if not data:
+            await query.answer("❌ Ошибка загрузки деталей.", show_alert=True)
+            return
 
-        imdb_id = ext_ids.get("imdb_id", "")
+        title_ru = data.get("nameRu") or data.get("nameOriginal") or "?"
+        title_en = data.get("nameEn") or ""
+        year = data.get("year") or "????"
+        rating_kp = data.get("ratingKinopoisk") or "?"
+        rating_imdb = data.get("ratingImdb") or "?"
+        description = data.get("description") or "Описание отсутствует"
+        genres = ", ".join([g.get("genre", "") for g in data.get("genres", [])[:3]])
+        poster_url = data.get("posterUrl") or data.get("posterUrlPreview") or ""
 
-        # Пытаемся получить ID Кинопоиска
-        kp_id = await get_kinopoisk_id_from_imdb(imdb_id)
-        if not kp_id:
-            kp_id = await get_kinopoisk_id_direct(int(tmdb_id), media_type)
+        # Доп. инфо для сериалов
+        extra = ""
+        icon = "🎬" if media_type == "movie" else "📺"
+        if media_type == "tv":
+            extra = f"\n📅 Сезонов: {data.get('numberOfSeasons', '?')} | Серий: {data.get('totalEpisodes', '?')}"
 
-        if media_type == "movie":
-            title = detail.get("title", "?")
-            year = (detail.get("release_date") or "")[:4]
-            icon = "🎬"
-            extra = ""
-        else:
-            title = detail.get("name", "?")
-            year = (detail.get("first_air_date") or "")[:4]
-            icon = "📺"
-            seasons = detail.get("number_of_seasons", "?")
-            episodes = detail.get("number_of_episodes", "?")
-            extra = f"\n📅 Сезонов: {seasons} | Серий: {episodes}"
-
-        orig_title = detail.get("original_title") or detail.get("original_name", "")
-        overview = detail.get("overview") or "Описание отсутствует"
-        rating = detail.get("vote_average", 0)
-        genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
-        poster_path = detail.get("poster_path", "")
-        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
-
-        # Создаём ссылку на sspoint (меняем kino → ss)
-        if kp_id:
-            sspoint_url = make_sspoisk_link(media_type, kp_id)
-            watch_text = f"\n\n🎥 *Смотреть бесплатно:*\n[{sspoint_url}]({sspoint_url})"
-        else:
-            watch_text = "\n\n⚠️ *Ссылка на sspoint не найдена* (не удалось получить ID Кинопоиска)"
+        # Ссылка Кинопоиска и замена kino → ss
+        kp_url = data.get("webUrl") or f"https://www.kinopoisk.ru/{'film' if media_type == 'movie' else 'series'}/{film_id}/"
+        ss_url = kp_url.replace("kinopoisk", "sspoisk").replace("kino", "ss")
 
         text = (
-            f"{icon} *{title}*"
-            + (f" / {orig_title}" if orig_title and orig_title != title else "")
+            f"{icon} *{title_ru}*"
+            + (f" / {title_en}" if title_en and title_en != title_ru else "")
             + f" ({year})\n\n"
-            f"⭐ Рейтинг: *{rating:.1f}/10*\n"
+            f"⭐ Кинопоиск: *{rating_kp}* | IMDB: *{rating_imdb}*\n"
             f"🎭 Жанр: {genres}"
             + extra
-            + f"\n\n📖 {overview[:500]}"
-            + watch_text
+            + f"\n\n📖 {description[:500]}"
+            + f"\n\n🎥 *Смотреть бесплатно:*\n[{ss_url}]({ss_url})"
         )
 
         if poster_url:
@@ -793,11 +688,12 @@ async def tmdb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         await query.message.delete()
+
     except Exception as e:
-        logger.error(f"TMDB callback: {e}")
+        logger.error(f"KP callback: {e}")
         await query.answer("❌ Ошибка.", show_alert=True)
 
-# ─── СОКРАЩЕНИЕ ССЫЛОК ────────────────────────────────────────────────────────
+# ─── СОКРАЩЕНИЕ ССЫЛОК ───────────────────────────────────────────────────────
 async def flash_short(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None):
     if not url:
         await update.message.reply_text("❗ Укажи ссылку: `флеш сократить https://example.com`", parse_mode=ParseMode.MARKDOWN)
@@ -814,7 +710,7 @@ async def flash_short(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         logger.error(f"Short: {e}")
         await update.message.reply_text("❌ Ошибка сокращения ссылки.")
 
-# ─── ПЕРЕВОД ──────────────────────────────────────────────────────────────────
+# ─── ПЕРЕВОД ─────────────────────────────────────────────────────────────────
 async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
     if not query:
         await update.message.reply_text("❗ Укажи текст: `флеш перевод hello world`", parse_mode=ParseMode.MARKDOWN)
@@ -836,19 +732,17 @@ async def flash_translate(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
         logger.error(f"Translate: {e}")
         await update.message.reply_text("❌ Ошибка перевода.")
 
-# ─── МЕМ ──────────────────────────────────────────────────────────────────────
+# ─── МЕМ ─────────────────────────────────────────────────────────────────────
 async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with aiohttp.ClientSession() as s:
             headers = {"User-Agent": "Mozilla/5.0"}
             async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
                 html = await r.text()
-
         import re as _re
         imgs = _re.findall(r'data-large-image="([^"]+)"', html)
         if not imgs:
             imgs = _re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
-
         if imgs:
             url = random.choice(imgs[:20])
             await update.message.reply_photo(photo=url, caption="😂 Мем с Пикабу")
@@ -879,7 +773,7 @@ async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Meme fallback: {e2}")
             await update.message.reply_text("❌ Не удалось получить мем.")
 
-# ─── ОБРАБОТЧИК ТЕКСТА ────────────────────────────────────────────────────────
+# ─── ОБРАБОТЧИК ТЕКСТА ───────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -888,7 +782,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     text = raw.lower()
 
-    # Если пользователь в режиме предложения — принимаем любой текст как идею
     if user_id in pending_idea:
         await flash_idea_receive(update, context)
         return
@@ -901,7 +794,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
     elif text == "💡 предложить": await flash_idea_start(update, context); return
 
-    # Авто-скачивание ссылки
     url = extract_url(raw)
     if url and is_supported_url(url):
         await download_video(update, context, url)
@@ -944,9 +836,9 @@ def main():
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^check_mail:"))
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^delete_mail:"))
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
-    app.add_handler(CallbackQueryHandler(tmdb_callback, pattern="^tmdb:"))
+    app.add_handler(CallbackQueryHandler(kp_callback, pattern="^kp:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("⚡ Flash Bot запущен!")
+    logger.info("⚡ Flash Bot запущен! (Кинопоиск API)")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     port = int(os.environ.get("PORT", 8443))
