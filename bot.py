@@ -33,8 +33,8 @@ try:
 except: pass
 
 try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp", "telethon"], check=True)
-    print("✅ Зависимости обновлены")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
+    print("✅ yt-dlp обновлён")
 except: pass
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -43,21 +43,12 @@ from telegram.ext import (
     ContextTypes, CallbackQueryHandler
 )
 from telegram.constants import ChatType, ParseMode
-from telethon import TelegramClient
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
-# ─── КОНФИГ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ──────────────────────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN", "")
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-TMDB_KEY = os.environ.get("TMDB_KEY", "")
-TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
-TG_API_HASH = os.environ.get("TG_API_HASH", "")
-
-# Проверка
-if not TOKEN:
-    print("❌ BOT_TOKEN не задан!")
-    sys.exit(1)
+# ─── КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ──────────────────────────────────────────
+TOKEN = os.environ.get("BOT_TOKEN", "8638601182:AAHAOf2wvybOOyhyt_PNijYkKkljJwGnN-g").strip()
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "c2b2631749aead62cfdc86b394e6399f").strip()
+OWNER_ID = int(os.environ.get("OWNER_ID", "1202730193"))
+TMDB_KEY = os.environ.get("TMDB_KEY", "8265bd1679663a7ea12ac168da84d2e8").strip()
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,9 +60,6 @@ URL_REGEX = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 pending_music = {}
 pending_idea = set()
 active_timers = {}
-
-# Telethon клиент (для скачивания из ТГ)
-telethon_client = None
 
 BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
 SHAME_RESPONSES = [
@@ -115,118 +103,6 @@ MAGIC_BALL_ANSWERS = [
     "🔮 По моим данным — нет", "😬 Перспективы не очень", "💀 Весьма сомнительно"
 ]
 
-# ─── ТЕЛЕТОН: ПЕРЕСЫЛКА ИЗ ЗАКРЫТЫХ КАНАЛОВ ──────────────────────────────────
-async def init_telethon():
-    """Инициализирует клиент Telethon"""
-    global telethon_client
-    if not TG_API_ID or not TG_API_HASH:
-        logger.warning("TG_API_ID или TG_API_HASH не заданы — скачивание из ТГ недоступно")
-        return
-    
-    session_file = "tg_session"
-    telethon_client = TelegramClient(session_file, TG_API_ID, TG_API_HASH)
-    await telethon_client.start()
-    logger.info("Telethon клиент готов")
-
-async def tg_download_media(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    """Скачивает медиа из любого ТГ канала (даже закрытого) через telethon"""
-    if not telethon_client:
-        await update.message.reply_text("❌ Функция недоступна (нет API ключей).")
-        return
-    
-    msg = await update.message.reply_text("📥 Скачиваю из ТГ...")
-    match = TG_PATTERN.search(url)
-    if not match:
-        await msg.edit_text("❌ Неверная ссылка.")
-        return
-
-    chat_id_str, message_id = match.groups()
-    message_id = int(message_id)
-
-    tmpdir = None
-    try:
-        # Для приватных каналов ID начинается с -100
-        if chat_id_str.isdigit():
-            if not chat_id_str.startswith("-100"):
-                chat_id = int(f"-100{chat_id_str}")
-            else:
-                chat_id = int(chat_id_str)
-        else:
-            chat_id = chat_id_str  # username канала
-
-        # Получаем сообщение через telethon
-        entity = await telethon_client.get_entity(chat_id)
-        tg_message = await telethon_client.get_messages(entity, ids=message_id)
-        
-        if not tg_message:
-            await msg.edit_text("❌ Сообщение не найдено.")
-            return
-
-        # Проверяем тип: фото или файл
-        if tg_message.photo:
-            tmpdir = tempfile.mkdtemp()
-            file_path = os.path.join(tmpdir, "photo.jpg")
-            await telethon_client.download_media(tg_message.photo, file_path)
-            
-            caption = tg_message.text or "Фото из ТГ"
-            async with aiofiles.open(file_path, "rb") as f:
-                photo_data = await f.read()
-            await update.message.reply_photo(
-                photo=photo_data,
-                caption=caption[:1024]
-            )
-            
-        elif tg_message.document or tg_message.video:
-            tmpdir = tempfile.mkdtemp()
-            file_ext = ".mp4" if tg_message.video else ""
-            file_path = os.path.join(tmpdir, f"file{file_ext}")
-            await telethon_client.download_media(tg_message, file_path)
-            
-            caption = tg_message.text or ""
-            file_size = os.path.getsize(file_path)
-            
-            if file_size > 50 * 1024 * 1024:
-                await msg.edit_text("⚠️ Файл > 50 МБ.")
-                return
-            
-            if tg_message.video:
-                async with aiofiles.open(file_path, "rb") as f:
-                    video_data = await f.read()
-                await update.message.reply_video(
-                    video=video_data,
-                    caption=caption[:1024],
-                    supports_streaming=True
-                )
-            else:
-                async with aiofiles.open(file_path, "rb") as f:
-                    doc_data = await f.read()
-                await update.message.reply_document(
-                    document=doc_data,
-                    caption=caption[:1024]
-                )
-        
-        elif tg_message.text:
-            # Если только текст — отправляем текст
-            await update.message.reply_text(
-                f"📝 *Сообщение из канала:*\n\n{tg_message.text[:4000]}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await msg.edit_text("❌ Не удалось получить контент.")
-            return
-        
-        await msg.delete()
-        
-    except Exception as e:
-        logger.error(f"TG download: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-    finally:
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            gc.collect()
-
-# ─── ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений, только ключи из переменных) ──────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚡ *Привет! Я Flash Bot!*\n\n"
@@ -245,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔗 `флеш сократить [ссылка]` — короткая ссылка\n"
         "📝 `флеш перевод [текст]` — перевод на русский\n"
         "😂 `флеш мем` — случайный мем\n"
-        "📥 `флеш тг [ссылка]` — скачать из ТГ (любой канал!)\n"
+        "📥 `флеш тг [ссылка]` — скачать из ТГ\n"
         "💡 `флеш предложить` — идея для бота\n"
         "⚡ `флеш` — список команд\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok/Instagram — скачаю!"
@@ -347,8 +223,24 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ─── МУЗЫКА (сокращённо) ─────────────────────────────────────────────────────
-SC_OPTS = {"quiet":True,"no_warnings":True,"http_headers":{"User-Agent":"Mozilla/5.0"}}
+# ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
+import shutil as _shutil
+def _find_ffmpeg():
+    p = _shutil.which("ffmpeg")
+    if p: return p
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except: pass
+    for path in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/store"]:
+        import glob as _glob
+        if os.path.exists(path): return path
+        matches = _glob.glob(f"{path}/**/ffmpeg", recursive=True)
+        if matches: return matches[0]
+    return "ffmpeg"
+_FFMPEG = _find_ffmpeg()
+
+SC_OPTS = {"quiet":True,"no_warnings":True,"http_headers":{"User-Agent":"Mozilla/5.0","Referer":"https://soundcloud.com/"}}
 
 async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
     msg = await update.message.reply_text(f"🔍 Ищу...", parse_mode=ParseMode.MARKDOWN)
@@ -471,6 +363,43 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True); gc.collect()
 
+# ─── СКАЧАТЬ ИЗ ТГ ───────────────────────────────────────────────────────────
+async def download_tg(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    msg = await update.message.reply_text("📥 Скачиваю из ТГ...")
+    match = TG_PATTERN.search(url)
+    if not match:
+        await msg.edit_text("❌ Неверная ссылка ТГ.")
+        return
+
+    chat_id_str, message_id = match.groups()
+    message_id = int(message_id)
+
+    # Пробуем разные форматы chat_id
+    chat_ids_to_try = []
+    
+    # Если username (буквы)
+    if not chat_id_str.lstrip('-').isdigit():
+        chat_ids_to_try.append(f"@{chat_id_str}")
+    else:
+        # Числовой ID: пробуем с -100 и без
+        chat_ids_to_try.append(int(chat_id_str))
+        if not chat_id_str.startswith("-100"):
+            chat_ids_to_try.append(int(f"-100{chat_id_str}"))
+
+    for chat_id in chat_ids_to_try:
+        try:
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=chat_id,
+                message_id=message_id
+            )
+            await msg.delete()
+            return
+        except Exception as e:
+            continue
+
+    await msg.edit_text("❌ Не удалось. Канал должен быть публичным или бот админом.")
+
 # ─── КУРС ВАЛЮТ ──────────────────────────────────────────────────────────────
 async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -536,8 +465,7 @@ async def flash_translate(update, context, query=None):
     if not query: await update.message.reply_text("❗ `флеш перевод hello`", parse_mode=ParseMode.MARKDOWN); return
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get("https://translate.googleapis.com/translate_a/single", params={"client":"gtx","sl":"auto","tl":"ru","dt":"t","q":query}) as r:
-                data = await r.json()
+            async with s.get("https://translate.googleapis.com/translate_a/single", params={"client":"gtx","sl":"auto","tl":"ru","dt":"t","q":query}) as r: data = await r.json()
         await update.message.reply_text(f"🌍 *Перевод:*\n{''.join([item[0] for item in data[0] if item[0]])}", parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
@@ -567,7 +495,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = extract_url(raw)
     if url:
-        if is_tg_url(url): await tg_download_media(update, context, url); return
+        if is_tg_url(url): await download_tg(update, context, url); return
         if is_supported_url(url): await download_video(update, context, url); return
 
     if not text.startswith("флеш"): return
@@ -594,12 +522,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "перевод": await flash_translate(update, context, query=arg or None)
     elif cmd == "мем": await flash_meme(update, context)
     elif cmd == "тг":
-        if arg: await tg_download_media(update, context, url=arg)
+        if arg: await download_tg(update, context, url=arg)
         else: await update.message.reply_text("❗ `флеш тг https://t.me/...`", parse_mode=ParseMode.MARKDOWN)
     elif cmd in ("предложить", "идея"): await flash_idea_start(update, context)
     else: await flash_help(update, context)
 
-# ─── MAIN (исправленный) ─────────────────────────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     import requests
     try: requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=5)
@@ -620,13 +548,7 @@ def main():
             await asyncio.sleep(5)
 
     app.add_error_handler(error_handler)
-
-    # Инициализируем Telethon при запуске
-    async def post_init(app):
-        await init_telethon()
-        logger.info("⚡ Flash Bot запущен!")
-
-    app.post_init = post_init
+    logger.info("⚡ Flash Bot запущен!")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     port = int(os.environ.get("PORT", "8443"))
