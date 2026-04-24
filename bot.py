@@ -12,8 +12,13 @@ import shutil
 import subprocess
 import sys
 import signal
+import time
+import gc
 from pathlib import Path
 from datetime import datetime, timedelta
+
+# Ждём перед запуском
+time.sleep(3)
 
 # Убиваем старые процессы
 try:
@@ -22,8 +27,8 @@ try:
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             cmdline = proc.info['cmdline']
-            if cmdline and 'python' in str(cmdline[0]).lower() and proc.info['pid'] != current_pid:
-                if any('bot' in str(arg).lower() for arg in cmdline):
+            if cmdline and proc.info['pid'] != current_pid:
+                if any('bot' in str(arg).lower() for arg in cmdline) and 'python' in str(cmdline[0]).lower():
                     os.kill(proc.info['pid'], signal.SIGTERM)
                     print(f"Убит старый процесс: {proc.info['pid']}")
         except: pass
@@ -32,8 +37,7 @@ except ImportError: pass
 try:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
     print("✅ yt-dlp обновлён")
-except Exception as e:
-    print(f"⚠️ Не удалось обновить yt-dlp: {e}")
+except: pass
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -47,10 +51,11 @@ WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
 OWNER_ID = 1202730193
 TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SUPPORTED_DOMAINS = ["youtube.com","youtu.be","tiktok.com","vm.tiktok.com","instagram.com","instagr.am","soundcloud.com","twitter.com","x.com","vk.com","facebook.com","fb.watch"]
+TG_PATTERN = re.compile(r'https?://t\.me/(?:c/)?([^/]+)/(\d+)')
 URL_REGEX = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
 pending_music = {}
@@ -65,12 +70,6 @@ SHAME_RESPONSES = [
     "👀 Я ЧТО ВИЖУ?! Иди Фиксиков пересматривай!",
     "😱 АЙ-АЙ-АЙ КАКОЙ(АЯ)! Телепузики обидятся!",
     "🚫 НЕТ-НЕТ-НЕТ! Иди Губку Боба смотри давай!",
-    "😠 ТЫ СЕРЬЁЗНО?! Назад к Трём богатырям!",
-    "🫵 СТЫДОБА! Дед Мороз всё видит между прочим...",
-    "🙊 ОЙ ВСЁ! Иди лучше Простоквашино пересмотри!",
-    "😡 КТО ТАК ДЕЛАЕТ?! Ну-ка быстро включил Мультики!",
-    "🤦 Я В ШОКЕ! Барбоскины расстроились бы...",
-    "👮 СТОП! Дядя Стёпа уже едет разбираться!",
 ]
 
 def is_private(u): return u.effective_chat.type == ChatType.PRIVATE
@@ -79,6 +78,20 @@ def extract_url(t):
     return m.group(0) if m else None
 def is_supported_url(url): return any(d in url.lower() for d in SUPPORTED_DOMAINS)
 def is_audio_url(url): return "soundcloud.com" in url.lower()
+def is_tg_url(url): return bool(TG_PATTERN.search(url))
+
+def cleanup_temp():
+    """Очищает все временные папки бота"""
+    try:
+        tmp = tempfile.gettempdir()
+        for item in os.listdir(tmp):
+            path = os.path.join(tmp, item)
+            if os.path.isdir(path) and item.startswith('tmp'):
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except: pass
+    except: pass
+    gc.collect()
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("🎲 Ролл"), KeyboardButton("🪙 Монетка")],
@@ -107,7 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎵 `флеш музыка [название]` — выбрать из 5 треков\n"
         "📧 `флеш почта` — временная почта 10 мин\n"
         "💱 `флеш курс` — курс валют\n"
-        "🪙 `флеш крипта` — курс биткоина и эфира\n"
+        "🪙 `флеш крипта` — курс BTC и ETH\n"
         "🎱 `флеш шар [вопрос]` — шар судьбы\n"
         "⏰ `флеш таймер [минуты]` — таймер\n"
         "🎬 `флеш кино [название]` — поиск фильма\n"
@@ -115,6 +128,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔗 `флеш сократить [ссылка]` — короткая ссылка\n"
         "📝 `флеш перевод [текст]` — перевод на русский\n"
         "😂 `флеш мем` — случайный мем\n"
+        "📥 `флеш тг [ссылка]` — скачать из ТГ канала\n"
         "💡 `флеш предложить` — идея для бота\n"
         "⚡ `флеш` — список команд\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok/Instagram — скачаю!"
@@ -174,16 +188,12 @@ async def flash_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true") as r:
                 data = await r.json()
-        btc = data.get("bitcoin", {})
-        eth = data.get("ethereum", {})
-        btc_change = btc.get("usd_24h_change", 0)
-        eth_change = eth.get("usd_24h_change", 0)
-        btc_emoji = "📈" if btc_change > 0 else "📉"
-        eth_emoji = "📈" if eth_change > 0 else "📉"
+        btc, eth = data.get("bitcoin", {}), data.get("ethereum", {})
+        btc_change, eth_change = btc.get("usd_24h_change", 0), eth.get("usd_24h_change", 0)
         await update.message.reply_text(
             f"🪙 *Криптовалюта (USD):*\n\n"
-            f"₿ Bitcoin: *${btc.get('usd', '?'):,.0f}*\n  {btc_emoji} 24ч: {btc_change:+.2f}%\n\n"
-            f"♦️ Ethereum: *${eth.get('usd', '?'):,.0f}*\n  {eth_emoji} 24ч: {eth_change:+.2f}%",
+            f"₿ Bitcoin: *${btc.get('usd', '?'):,.0f}*\n  {'📈' if btc_change > 0 else '📉'} 24ч: {btc_change:+.2f}%\n\n"
+            f"♦️ Ethereum: *${eth.get('usd', '?'):,.0f}*\n  {'📈' if eth_change > 0 else '📉'} 24ч: {eth_change:+.2f}%",
             parse_mode=ParseMode.MARKDOWN
         )
     except: await update.message.reply_text("❌ Ошибка.")
@@ -192,10 +202,9 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
     if not city:
         await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN)
         return
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url) as r:
+            async with s.get(f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru") as r:
                 if r.status != 200:
                     await update.message.reply_text(f"❌ Город *{city}* не найден.", parse_mode=ParseMode.MARKDOWN)
                     return
@@ -221,8 +230,9 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❗ Ответь на голосовое или кружок.")
         return
     status = await msg.reply_text("🎙 Распознаю...")
-    tmpdir = tempfile.mkdtemp()
+    tmpdir = None
     try:
+        tmpdir = tempfile.mkdtemp()
         file = await context.bot.get_file(target.file_id)
         ogg = os.path.join(tmpdir, "v.ogg")
         wav = os.path.join(tmpdir, "v.wav")
@@ -255,10 +265,9 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = await loop.run_in_executor(None, do_recognize)
         if text: await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else: await status.edit_text("🎙 Речь не распознана.")
-    except Exception as e:
-        await status.edit_text(f"❌ Ошибка")
+    except: await status.edit_text("❌ Ошибка.")
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
 import shutil as _shutil
@@ -272,14 +281,14 @@ def _find_ffmpeg():
     for path in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/store"]:
         import glob as _glob
         if os.path.exists(path): return path
-        matches = _glob.glob(f"{path}/**/ffmpeg", recursive=True)
-        if matches: return matches[0]
+        for f in _glob.glob(f"{path}/**/ffmpeg", recursive=True): return f
     return "ffmpeg"
 _FFMPEG = _find_ffmpeg()
+logger.info(f"FFMPEG: {_FFMPEG}")
 
 SC_OPTS_BASE = {
     "quiet": True, "ffmpeg_location": _FFMPEG, "no_warnings": True,
-    "http_headers": {"User-Agent": "Mozilla/5.0", "Referer": "https://soundcloud.com/"},
+    "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://soundcloud.com/"},
     "extractor_args": {"soundcloud": {"client_id": [""]}},
 }
 
@@ -315,6 +324,7 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         pending_music[uid] = results
         await msg.edit_text(f"🎵 Найдено на *{'SoundCloud' if source == 'sc' else 'YouTube'}*:\n\nВыбери трек:", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
+        logger.error(f"Music search: {e}")
         await msg.edit_text("❌ Ошибка поиска.")
 
 async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,22 +339,48 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.message.edit_text("❌ Сессия устарела.")
         return
     track = tracks[idx]
-    await query.message.edit_text(f"⬇️ Скачиваю...", parse_mode=ParseMode.MARKDOWN)
-    tmpdir = tempfile.mkdtemp()
+    await query.message.edit_text(f"⬇️ Скачиваю *{track['title']}*...", parse_mode=ParseMode.MARKDOWN)
+    tmpdir = None
     try:
+        tmpdir = tempfile.mkdtemp()
         import yt_dlp
-        ydl_opts = {**SC_OPTS_BASE, "format": "bestaudio/best", "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"), "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]}
+        ydl_opts = {
+            **SC_OPTS_BASE,
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            "max_filesize": 48 * 1024 * 1024,
+        }
         def do_dl():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([track["url"]])
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([track["url"]])
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, do_dl)
         mp3_files = list(Path(tmpdir).glob("*.mp3"))
-        if not mp3_files: raise FileNotFoundError("MP3 не найден")
+        if not mp3_files:
+            # Попытка найти любой аудиофайл
+            for ext in ["*.m4a", "*.webm", "*.opus", "*.ogg"]:
+                mp3_files = list(Path(tmpdir).glob(ext))
+                if mp3_files: break
+        if not mp3_files: raise FileNotFoundError("Аудио не найдено")
+        await query.message.edit_text("📤 Отправляю...")
         async with aiofiles.open(mp3_files[0], "rb") as f:
-            await query.message.reply_audio(audio=await f.read(), title=track["title"], duration=track["duration"])
+            audio_data = await f.read()
+        await query.message.reply_audio(
+            audio=audio_data,
+            title=track["title"],
+            duration=track["duration"],
+            caption=f"🎵 {track['title']}"
+        )
         await query.message.delete()
-    except: await query.message.edit_text("❌ Ошибка.")
-    finally: shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception as e:
+        logger.error(f"Music dl: {e}")
+        await query.message.edit_text("❌ Не удалось скачать. Попробуй другой трек.")
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            del audio_data
+        gc.collect()
 
 # ─── ВРЕМЕННАЯ ПОЧТА ─────────────────────────────────────────────────────────
 async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,12 +392,14 @@ async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.guerrillamail.com/ajax.php?f=get_email_address") as r:
                 data = await r.json()
-        await msg.edit_text(f"📧 *Почта:* `{data['email_addr']}`\n⏰ 10 мин", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Проверить", callback_data=f"gm_check:{data['sid_token']}")], [InlineKeyboardButton("🗑 Закрыть", callback_data="gm_delete")]]))
-        async def expire():
-            await asyncio.sleep(600)
-            try: await msg.edit_text("⏰ Истекла.")
-            except: pass
-        asyncio.create_task(expire())
+        await msg.edit_text(
+            f"📧 *Почта:* `{data['email_addr']}`\n⏰ 10 мин",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 Проверить", callback_data=f"gm_check:{data['sid_token']}")],
+                [InlineKeyboardButton("🗑 Закрыть", callback_data="gm_delete")]
+            ])
+        )
     except: await msg.edit_text("❌ Ошибка.")
 
 async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,15 +411,19 @@ async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get(f"https://api.guerrillamail.com/ajax.php?f=get_email_list&offset=0&sid_token={sid}") as r:
-                    result = await r.json()
-                    emails = result.get("list", [])
+                    emails = (await r.json()).get("list", [])
             if not emails: await query.answer("📭 Пусто.", show_alert=True); return
             text = "📥 *Входящие:*\n\n"
             for m in emails[:5]:
                 text += f"📨 `{m.get('mail_from', '?')}`\n   {m.get('mail_subject', '(без темы)')}\n\n"
-            await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить", callback_data=f"gm_check:{sid}")], [InlineKeyboardButton("🗑 Закрыть", callback_data="gm_delete")]]))
+            await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"gm_check:{sid}")],
+                    [InlineKeyboardButton("🗑 Закрыть", callback_data="gm_delete")]
+                ]))
         except: await query.answer("❌ Ошибка.", show_alert=True)
-    elif data == "gm_delete": await query.message.edit_text("🗑 Закрыта.")
+    elif data == "gm_delete":
+        await query.message.edit_text("🗑 Закрыта.")
 
 # ─── ПРЕДЛОЖЕНИЯ ─────────────────────────────────────────────────────────────
 async def flash_idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -404,17 +446,27 @@ async def flash_idea_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     pending_idea.discard(user_id)
     await update.message.reply_text("✅ *Спасибо!*", parse_mode=ParseMode.MARKDOWN)
 
-# ─── СКАЧАТЬ ВИДЕО ───────────────────────────────────────────────────────────
+# ─── СКАЧАТЬ ВИДЕО С САЙТОВ ─────────────────────────────────────────────────
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     audio_only = is_audio_url(url)
     msg = await update.message.reply_text("⬇️ Скачиваю...")
-    tmpdir = tempfile.mkdtemp()
+    tmpdir = None
     try:
+        tmpdir = tempfile.mkdtemp()
         import yt_dlp
         if audio_only:
-            ydl_opts = {"format": "bestaudio/best", "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"), "quiet": True, "ffmpeg_location": _FFMPEG, "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}], "max_filesize": 48*1024*1024}
+            ydl_opts = {
+                "format": "bestaudio/best", "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
+                "quiet": True, "ffmpeg_location": _FFMPEG,
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+                "max_filesize": 48 * 1024 * 1024,
+            }
         else:
-            ydl_opts = {"format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best", "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"), "quiet": True, "merge_output_format": "mp4", "max_filesize": 48*1024*1024}
+            ydl_opts = {
+                "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
+                "quiet": True, "merge_output_format": "mp4", "max_filesize": 48 * 1024 * 1024,
+            }
         def do_dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl: return ydl.extract_info(url, download=True)
         loop = asyncio.get_event_loop()
@@ -425,20 +477,77 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         await msg.edit_text("📤 Отправляю...")
         if audio_only:
             files = list(Path(tmpdir).glob("*.mp3"))
-            if not files: raise FileNotFoundError("MP3 не найден")
+            if not files: files = list(Path(tmpdir).glob("*.*"))
+            if not files: raise FileNotFoundError("Файл не найден")
             async with aiofiles.open(files[0], "rb") as f:
-                await update.message.reply_audio(audio=await f.read(), title=title, duration=duration)
+                file_data = await f.read()
+            await update.message.reply_audio(audio=file_data, title=title, duration=duration)
         else:
             files = list(Path(tmpdir).glob("*.mp4"))
             if not files: files = [f for f in Path(tmpdir).iterdir() if f.suffix in (".mp4",".mkv",".webm",".mov")]
             if not files: raise FileNotFoundError("Видео не найдено")
-            if files[0].stat().st_size > 50*1024*1024:
-                await msg.edit_text("⚠️ > 50 МБ."); return
+            if files[0].stat().st_size > 50 * 1024 * 1024:
+                await msg.edit_text("⚠️ > 50 МБ.")
+                return
             async with aiofiles.open(files[0], "rb") as f:
-                await update.message.reply_video(video=await f.read(), caption=f"🎬 {title}", duration=duration, supports_streaming=True)
+                file_data = await f.read()
+            await update.message.reply_video(
+                video=file_data, caption=f"🎬 {title}",
+                duration=duration, supports_streaming=True
+            )
         await msg.delete()
-    except: await msg.edit_text("❌ Ошибка.")
-    finally: shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception as e:
+        logger.error(f"Video dl: {e}")
+        await msg.edit_text("❌ Ошибка скачивания.")
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            if 'file_data' in locals(): del file_data
+        gc.collect()
+
+# ─── СКАЧАТЬ ИЗ ТГ ───────────────────────────────────────────────────────────
+async def download_tg(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    msg = await update.message.reply_text("📥 Скачиваю из ТГ...")
+    tmpdir = None
+    try:
+        match = TG_PATTERN.search(url)
+        if not match:
+            await msg.edit_text("❌ Неверная ссылка ТГ.")
+            return
+
+        chat_id, message_id = match.groups()
+        
+        # Для приватных каналов ID начинается с -100
+        if not chat_id.startswith("-100"):
+            chat_id = f"-100{chat_id}"
+
+        # Получаем сообщение из ТГ
+        try:
+            # Пробуем переслать сообщение боту
+            await context.bot.forward_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=int(chat_id),
+                message_id=int(message_id)
+            )
+            await msg.edit_text("✅ Переслал сообщение из канала!")
+            return
+        except Exception as e:
+            logger.error(f"TG forward: {e}")
+            
+        # Если не получилось — пробуем скопировать
+        try:
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=int(chat_id),
+                message_id=int(message_id)
+            )
+            await msg.edit_text("✅ Скопировал из канала!")
+            return
+        except Exception as e:
+            logger.error(f"TG copy: {e}")
+            await msg.edit_text("❌ Не удалось получить доступ к каналу.\nДобавь бота в канал как админа или убедись что канал публичный.")
+    finally:
+        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── КУРС ВАЛЮТ ──────────────────────────────────────────────────────────────
 async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,7 +556,15 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with s.get("https://open.er-api.com/v6/latest/USD") as r:
                 data = await r.json()
         rates = data.get("rates", {})
-        await update.message.reply_text(f"💱 *Курс к USD:*\n\n🇷🇺 RUB: *{rates.get('RUB','?'):.2f}*\n🇰🇿 KZT: *{rates.get('KZT','?'):.2f}*\n🇺🇦 UAH: *{rates.get('UAH','?'):.2f}*\n🇪🇺 EUR: *{rates.get('EUR','?'):.4f}*\n🇬🇧 GBP: *{rates.get('GBP','?'):.4f}*", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"💱 *Курс к USD:*\n\n"
+            f"🇷🇺 RUB: *{rates.get('RUB','?'):.2f}*\n"
+            f"🇰🇿 KZT: *{rates.get('KZT','?'):.2f}*\n"
+            f"🇺🇦 UAH: *{rates.get('UAH','?'):.2f}*\n"
+            f"🇪🇺 EUR: *{rates.get('EUR','?'):.4f}*\n"
+            f"🇬🇧 GBP: *{rates.get('GBP','?'):.4f}*",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except: await update.message.reply_text("❌ Ошибка.")
 
 # ─── ПОИСК ФИЛЬМОВ (без ссылок) ──────────────────────────────────────────────
@@ -459,7 +576,7 @@ async def search_movie_tv(update, query: str, media_type: str):
                 search = await r.json()
         results = search.get("results", [])
         if not results:
-            await msg.edit_text(f"❌ Ничего не найдено.")
+            await msg.edit_text("❌ Ничего не найдено.")
             return
         buttons = []
         for i, item in enumerate(results[:5]):
@@ -478,8 +595,7 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         parts = query.data.split(":", 4)
         media_type, tmdb_id = parts[1], parts[2]
-        title_cb = parts[3] if len(parts) > 3 else ""
-        year_cb = parts[4] if len(parts) > 4 else ""
+        title_cb, year_cb = parts[3] if len(parts) > 3 else "", parts[4] if len(parts) > 4 else ""
     except:
         await query.message.edit_text("❌ Ошибка.")
         return
@@ -495,18 +611,18 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = detail.get("name", title_cb or "?")
             year_val = (detail.get("first_air_date") or year_cb or "")[:4]
             icon = "📺"
-            seasons = detail.get("number_of_seasons", "?")
-            episodes = detail.get("number_of_episodes", "?")
-            extra = f"\n📅 Сезонов: {seasons} | Серий: {episodes}"
+            extra = f"\n📅 Сезонов: {detail.get('number_of_seasons','?')} | Серий: {detail.get('number_of_episodes','?')}"
         orig_title = detail.get("original_title") or detail.get("original_name", "")
         overview = detail.get("overview") or "Описание отсутствует"
         rating = detail.get("vote_average", 0)
         genres = ", ".join([g["name"] for g in detail.get("genres", [])[:3]])
         poster_path = detail.get("poster_path", "")
-        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else ""
-        text = (f"{icon} *{title}*" + (f" / {orig_title}" if orig_title and orig_title != title else "") + f" ({year_val})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}" + extra + f"\n\n📖 {overview[:500]}")
-        if poster_url:
-            await query.message.reply_photo(photo=poster_url, caption=text, parse_mode=ParseMode.MARKDOWN)
+        text = (
+            f"{icon} *{title}*" + (f" / {orig_title}" if orig_title and orig_title != title else "") +
+            f" ({year_val})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}" + extra + f"\n\n📖 {overview[:500]}"
+        )
+        if poster_path:
+            await query.message.reply_photo(photo=f"https://image.tmdb.org/t/p/w500{poster_path}", caption=text, parse_mode=ParseMode.MARKDOWN)
         else:
             await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         await query.message.delete()
@@ -553,7 +669,9 @@ async def flash_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession() as s:
             async with s.get("https://meme-api.com/gimme/rus") as r:
                 data = await r.json()
-                if data.get("url"): await update.message.reply_photo(photo=data["url"], caption=data.get("title", "😂")); return
+                if data.get("url"):
+                    await update.message.reply_photo(photo=data["url"], caption=data.get("title", "😂"))
+                    return
     except: pass
     await update.message.reply_text("😅 Недоступны.")
 
@@ -575,8 +693,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "💡 предложить": await flash_idea_start(update, context); return
 
     url = extract_url(raw)
-    if url and is_supported_url(url):
-        await download_video(update, context, url); return
+    if url:
+        if is_tg_url(url):
+            await download_tg(update, context, url); return
+        if is_supported_url(url):
+            await download_video(update, context, url); return
 
     if not text.startswith("флеш"): return
 
@@ -602,23 +723,43 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "сократить": await flash_short(update, context, url=arg or None)
     elif cmd == "перевод": await flash_translate(update, context, query=arg or None)
     elif cmd == "мем": await flash_meme(update, context)
+    elif cmd == "тг":
+        if arg: await download_tg(update, context, url=arg)
+        else: await update.message.reply_text("❗ `флеш тг https://t.me/...`", parse_mode=ParseMode.MARKDOWN)
     elif cmd in ("предложить", "идея"): await flash_idea_start(update, context)
     else: await flash_help(update, context)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
+    # Принудительно удаляем вебхук
+    import requests
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=5)
+        logger.info("Webhook deleted before start")
+    except: pass
+    time.sleep(1)
+
+    # Очищаем старые временные файлы
+    cleanup_temp()
+
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^dl_music:"))
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
     app.add_handler(CallbackQueryHandler(movie_info_callback, pattern="^movie_info:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("⚡ Flash Bot запущен!")
 
-    async def del_webhook():
-        async with aiohttp.ClientSession() as s:
-            await s.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-    asyncio.new_event_loop().run_until_complete(del_webhook())
+    # Обработчик ошибок
+    async def error_handler(update, context):
+        logger.error(f"Error: {context.error}")
+        try:
+            # При 409 Conflict — просто ждём
+            if "Conflict" in str(context.error):
+                await asyncio.sleep(5)
+        except: pass
+
+    app.add_error_handler(error_handler)
+    logger.info("⚡ Flash Bot запущен!")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     port = int(os.environ.get("PORT", 8443))
