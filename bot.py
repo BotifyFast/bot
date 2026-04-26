@@ -175,7 +175,7 @@ async def flash_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
-# ─── ПОГОДА С МЕСТНЫМ ВРЕМЕНЕМ ───────────────────────────────────────────────
+# ─── ПОГОДА ───────────────────────────────────────────────────────────────────
 async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city=None):
     if not city:
         await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN)
@@ -185,7 +185,6 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
 
     try:
         async with aiohttp.ClientSession() as s:
-            # Текущая погода
             async with s.get(
                 f"https://api.openweathermap.org/data/2.5/weather",
                 params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru"}
@@ -198,22 +197,17 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
             lat, lon = current["coord"]["lat"], current["coord"]["lon"]
             timezone_offset = current["timezone"]
 
-            # Прогноз
             async with s.get(
                 "https://api.openweathermap.org/data/2.5/forecast",
                 params={"lat": lat, "lon": lon, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru", "cnt": 4}
             ) as r:
                 forecast = await r.json() if r.status == 200 else None
 
-        # Иконки
         icons = {"Clear":"☀️","Clouds":"☁️","Rain":"🌧","Snow":"❄️","Thunderstorm":"⛈","Drizzle":"🌦","Mist":"🌫","Fog":"🌫"}
         icon = icons.get(current["weather"][0]["main"], "🌡")
 
-        # Местное время
         tz = timezone(timedelta(seconds=timezone_offset))
         local_time = datetime.now(timezone.utc).astimezone(tz).strftime("%H:%M")
-
-        # Восход/закат в местном времени
         sunrise = datetime.fromtimestamp(current["sys"]["sunrise"], tz=tz).strftime("%H:%M")
         sunset = datetime.fromtimestamp(current["sys"]["sunset"], tz=tz).strftime("%H:%M")
 
@@ -228,7 +222,6 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
             f"🌇 Закат: {sunset}"
         )
 
-        # Прогноз
         if forecast and forecast.get("list"):
             text += "\n\n📊 *Прогноз:*\n"
             for item in forecast["list"][:4]:
@@ -242,39 +235,80 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
+# ─── ГОЛОС (ИСПРАВЛЕНО) ──────────────────────────────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg.reply_to_message: await msg.reply_text("❗ Ответь на голосовое"); return
-    target = msg.reply_to_message.voice or msg.reply_to_message.video_note
-    if not target: await msg.reply_text("❗ Ответь на голосовое"); return
-    status = await msg.reply_text("🎙 Распознаю...")
+    
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Ответь на голосовое сообщение командой `флеш голос`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    target = msg.reply_to_message.voice or msg.reply_to_message.video_note or msg.reply_to_message.audio
+    if not target:
+        await msg.reply_text("❗ Ответь на голосовое, видеосообщение или аудио.")
+        return
+    
+    status = await msg.reply_text("🎙 Распознаю речь...")
     tmpdir = None
+    
     try:
         tmpdir = tempfile.mkdtemp()
+        
+        # Скачиваем файл
         file = await context.bot.get_file(target.file_id)
-        ogg, wav = os.path.join(tmpdir, "v.ogg"), os.path.join(tmpdir, "v.wav")
-        await file.download_to_drive(ogg)
-        import shutil as _sh
-        ffmpeg = _sh.which("ffmpeg") or "ffmpeg"
-        p = await asyncio.create_subprocess_exec(ffmpeg, "-y", "-i", ogg, "-ar", "16000", "-ac", "1", "-f", "wav", wav, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await p.wait()
+        input_path = os.path.join(tmpdir, "input.ogg")
+        wav_path = os.path.join(tmpdir, "output.wav")
+        await file.download_to_drive(input_path)
+        
+        # Конвертируем в WAV через ffmpeg
+        ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path]
+        proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        
+        # Отправляем в Google Speech API
         import requests as _rq
         loop = asyncio.get_event_loop()
-        def rec():
-            with open(wav,"rb") as f: data = f.read()
-            resp = _rq.post("https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw", data=data, headers={"Content-Type":"audio/l16; rate=16000"})
+        
+        def recognize_speech():
+            with open(wav_path, "rb") as f:
+                audio_data = f.read()
+            
+            url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+            headers = {"Content-Type": "audio/l16; rate=16000"}
+            
+            resp = _rq.post(url, data=audio_data, headers=headers)
+            
             result = ""
             for line in resp.text.strip().split("\n"):
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 try:
-                    for alt in json.loads(line).get("result",[])[0].get("alternative",[]): result += alt.get("transcript","") + " "
-                except: continue
+                    data = json.loads(line)
+                    alternatives = data.get("result", [])
+                    if alternatives:
+                        for alt in alternatives[0].get("alternative", []):
+                            result += alt.get("transcript", "") + " "
+                except:
+                    pass
             return result.strip()
-        text = await loop.run_in_executor(None, rec)
-        await status.edit_text(f"🎙 {text}" if text else "Не распознано")
-    except: await status.edit_text("❌ Ошибка")
+        
+        text = await loop.run_in_executor(None, recognize_speech)
+        
+        if text:
+            await status.edit_text(f"🎙 *Распознанный текст:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await status.edit_text("🎙 Речь не распознана. Попробуй ещё раз.")
+    
+    except Exception as e:
+        logger.error(f"Voice: {e}")
+        await status.edit_text(f"❌ Ошибка распознавания.")
     finally:
-        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir and os.path.exists(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
 import shutil as _shutil
@@ -441,7 +475,7 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"💱 *Курс к USD:*\n\n🇷🇺 RUB: *{rates.get('RUB','?'):.2f}*\n🇰🇿 KZT: *{rates.get('KZT','?'):.2f}*\n🇺🇦 UAH: *{rates.get('UAH','?'):.2f}*\n🇪🇺 EUR: *{rates.get('EUR','?'):.4f}*\n🇬🇧 GBP: *{rates.get('GBP','?'):.4f}*", parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
-# ─── ПОИСК ФИЛЬМОВ ──────────────────────────────────────────────────────────
+# ─── ПОИСК ФИЛЬМОВ (С ДЛИТЕЛЬНОСТЬЮ) ────────────────────────────────────────
 async def search_movie_tv(update, query: str, media_type: str):
     msg = await update.message.reply_text(f"🔍 Ищу...", parse_mode=ParseMode.MARKDOWN)
     try:
@@ -465,15 +499,48 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         async with aiohttp.ClientSession() as s:
             async with s.get(f"https://api.themoviedb.org/3/{media}/{tmdb_id}", params={"api_key":TMDB_KEY,"language":"ru-RU"}) as r:
                 d = await r.json()
+        
         title = d.get("title") if media == "movie" else d.get("name", title_cb or "?")
         year = (d.get("release_date") if media == "movie" else d.get("first_air_date") or year_cb or "")[:4]
-        extra = "" if media == "movie" else f"\n📅 Сезонов: {d.get('number_of_seasons','?')} | Серий: {d.get('number_of_episodes','?')}"
-        text = f"{'🎬' if media=='movie' else '📺'} *{title}*" + (f" / {d.get('original_title') or d.get('original_name','')}" if d.get('original_title') or d.get('original_name') else "") + f" ({year})\n\n⭐ *{d.get('vote_average',0):.1f}/10*\n🎭 {', '.join([g['name'] for g in d.get('genres',[])][:3])}{extra}\n\n📖 {(d.get('overview') or 'Нет описания')[:500]}"
-        poster = d.get("poster_path","")
+        rating = d.get("vote_average", 0)
+        genres = ", ".join([g["name"] for g in d.get("genres", [])[:3]])
+        overview = d.get("overview") or "Нет описания"
+        poster = d.get("poster_path", "")
+        
+        if media == "movie":
+            # Длительность фильма
+            runtime = d.get("runtime", 0)
+            if runtime:
+                hours = runtime // 60
+                mins = runtime % 60
+                if hours > 0:
+                    runtime_str = f"{hours} ч {mins} мин"
+                else:
+                    runtime_str = f"{mins} мин"
+                extra = f"\n⏱ *Длительность:* {runtime_str}"
+            else:
+                extra = ""
+            
+            text = f"🎬 *{title}*" + (f" / {d.get('original_title','')}" if d.get('original_title') and d.get('original_title') != title else "") + f" ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
+        else:
+            # Сериал: сезоны, серии, длительность серии
+            seasons = d.get("number_of_seasons", "?")
+            episodes = d.get("number_of_episodes", "?")
+            ep_runtime = d.get("episode_run_time", [])
+            
+            extra = f"\n📅 *Сезонов:* {seasons} | *Серий:* {episodes}"
+            if ep_runtime:
+                ep_min = ep_runtime[0]
+                extra += f"\n⏱ *Длительность серии:* ~{ep_min} мин"
+            
+            text = f"📺 *{title}*" + (f" / {d.get('original_name','')}" if d.get('original_name') and d.get('original_name') != title else "") + f" ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
+        
         if poster: await q.message.reply_photo(photo=f"https://image.tmdb.org/t/p/w500{poster}", caption=text, parse_mode=ParseMode.MARKDOWN)
         else: await q.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         await q.message.delete()
-    except: await q.message.edit_text("❌ Ошибка.")
+    except Exception as e:
+        logger.error(f"Movie info: {e}")
+        await q.message.edit_text("❌ Ошибка.")
 
 async def flash_movie(update, context, query=None):
     if not query: await update.message.reply_text("❗ `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN); return
