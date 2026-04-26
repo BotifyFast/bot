@@ -31,7 +31,7 @@ try:
 except: pass
 
 try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp", "SpeechRecognition", "pydub"], check=True)
 except: pass
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -235,11 +235,8 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
-# ─── ГОЛОС (ИСПРАВЛЕНО) ──────────────────────────────────────────────────────
-# Замени функцию flash_voice на эту:
-
+# ─── ГОЛОС (ПОЛНОСТЬЮ ПЕРЕПИСАН) ─────────────────────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Распознавание голоса через OpenAI Whisper (бесплатно)"""
     msg = update.message
     
     if not msg.reply_to_message:
@@ -259,105 +256,96 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Скачиваем файл
         file = await context.bot.get_file(target.file_id)
-        input_path = os.path.join(tmpdir, "input.ogg")
-        output_path = os.path.join(tmpdir, "output.wav")
-        await file.download_to_drive(input_path)
+        ogg_path = os.path.join(tmpdir, "voice.ogg")
+        wav_path = os.path.join(tmpdir, "voice.wav")
+        await file.download_to_drive(ogg_path)
         
-        # Конвертируем в WAV
-        ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", output_path]
+        # Конвертируем в WAV 16kHz mono
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", ogg_path,
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            wav_path
+        ]
+        
         proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
+            stderr=asyncio.subprocess.PIPE
         )
-        await proc.wait()
+        _, stderr = await proc.communicate()
         
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            await status.edit_text("❌ Не удалось обработать аудио.")
+        if proc.returncode != 0:
+            logger.error(f"FFmpeg error: {stderr.decode()}")
+            await status.edit_text("❌ Ошибка обработки аудио.")
             return
         
-        # Используем requests для отправки
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+            await status.edit_text("❌ Аудиофайл пустой.")
+            return
+        
+        # Отправляем в Google Speech API
         import requests as _rq
         
-        # Пробуем Google Speech API
-        try:
-            loop = asyncio.get_event_loop()
+        def recognize():
+            with open(wav_path, "rb") as f:
+                audio_bytes = f.read()
             
-            def google_recognize():
-                with open(output_path, "rb") as f:
-                    audio_data = f.read()
-                
-                # Отправляем как FLAC (более надёжный формат)
-                url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-                headers = {"Content-Type": "audio/l16; rate=16000"}
-                
-                resp = _rq.post(url, data=audio_data, headers=headers, timeout=10)
-                
-                if resp.status != 200:
-                    return None
-                
-                result = ""
-                for line in resp.text.strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                        results = data.get("result", [])
-                        for r in results:
-                            for alt in r.get("alternative", []):
-                                if alt.get("transcript"):
-                                    result += alt["transcript"] + " "
-                    except:
-                        pass
-                return result.strip() if result.strip() else None
+            url = "https://www.google.com/speech-api/v2/recognize"
+            params = {
+                "output": "json",
+                "lang": "ru-RU",
+                "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+            }
+            headers = {
+                "Content-Type": "audio/l16; rate=16000"
+            }
             
-            text = await loop.run_in_executor(None, google_recognize)
+            resp = _rq.post(url, params=params, data=audio_bytes, headers=headers, timeout=30)
             
-            if text:
-                await status.edit_text(f"🎙 *Распознанный текст:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
-                return
+            if resp.status_code != 200:
+                logger.error(f"Google API status: {resp.status_code}")
+                return None
             
-        except Exception as e:
-            logger.error(f"Google API error: {e}")
+            result = ""
+            for line in resp.text.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    alternatives = data.get("result", [])
+                    if alternatives:
+                        for alt in alternatives[0].get("alternative", []):
+                            transcript = alt.get("transcript", "")
+                            if transcript:
+                                result += transcript + " "
+                except Exception as e:
+                    logger.error(f"Parse error: {e}")
+                    continue
+            
+            return result.strip() if result.strip() else None
         
-        # Если Google не сработал — пробуем Whisper API (бесплатный)
-        try:
-            import requests as _rq2
-            
-            def whisper_recognize():
-                with open(output_path, "rb") as f:
-                    files = {"file": ("audio.wav", f, "audio/wav")}
-                    resp = _rq2.post(
-                        "https://api.openai.com/v1/audio/transcriptions",
-                        headers={"Authorization": "Bearer free"},  # Бесплатный доступ
-                        files=files,
-                        data={"model": "whisper-1", "language": "ru"}
-                    )
-                    if resp.status == 200:
-                        return resp.json().get("text", "")
-                    return None
-            
-            text = await loop.run_in_executor(None, whisper_recognize)
-            
-            if text:
-                await status.edit_text(f"🎙 *Распознанный текст:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
-                return
-                
-        except Exception as e:
-            logger.error(f"Whisper error: {e}")
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(None, recognize)
         
-        # Если ничего не сработало
-        await status.edit_text(
-            "🎙 *Речь не распознана.*\n\n"
-            "Возможные причины:\n"
-            "• Слишком тихо или шумно\n"
-            "• Неразборчивая речь\n"
-            "• Технические проблемы\n\n"
-            "Попробуй ещё раз!"
-        )
+        if text:
+            await status.edit_text(
+                f"🎙 *Распознанный текст:*\n\n{text}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await status.edit_text(
+                "🎙 *Речь не распознана.*\n\n"
+                "Попробуй:\n"
+                "• Говорить чётче и громче\n"
+                "• Записать в тихом месте\n"
+                "• Использовать другое голосовое"
+            )
     
     except Exception as e:
-        logger.error(f"Voice total error: {e}")
+        logger.error(f"Voice error: {e}")
         await status.edit_text("❌ Ошибка распознавания.")
     finally:
         if tmpdir and os.path.exists(tmpdir):
@@ -528,7 +516,7 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"💱 *Курс к USD:*\n\n🇷🇺 RUB: *{rates.get('RUB','?'):.2f}*\n🇰🇿 KZT: *{rates.get('KZT','?'):.2f}*\n🇺🇦 UAH: *{rates.get('UAH','?'):.2f}*\n🇪🇺 EUR: *{rates.get('EUR','?'):.4f}*\n🇬🇧 GBP: *{rates.get('GBP','?'):.4f}*", parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
-# ─── ПОИСК ФИЛЬМОВ (С ДЛИТЕЛЬНОСТЬЮ) ────────────────────────────────────────
+# ─── ПОИСК ФИЛЬМОВ ──────────────────────────────────────────────────────────
 async def search_movie_tv(update, query: str, media_type: str):
     msg = await update.message.reply_text(f"🔍 Ищу...", parse_mode=ParseMode.MARKDOWN)
     try:
@@ -561,39 +549,28 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         poster = d.get("poster_path", "")
         
         if media == "movie":
-            # Длительность фильма
             runtime = d.get("runtime", 0)
             if runtime:
                 hours = runtime // 60
                 mins = runtime % 60
-                if hours > 0:
-                    runtime_str = f"{hours} ч {mins} мин"
-                else:
-                    runtime_str = f"{mins} мин"
+                runtime_str = f"{hours} ч {mins} мин" if hours > 0 else f"{mins} мин"
                 extra = f"\n⏱ *Длительность:* {runtime_str}"
             else:
                 extra = ""
-            
             text = f"🎬 *{title}*" + (f" / {d.get('original_title','')}" if d.get('original_title') and d.get('original_title') != title else "") + f" ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
         else:
-            # Сериал: сезоны, серии, длительность серии
             seasons = d.get("number_of_seasons", "?")
             episodes = d.get("number_of_episodes", "?")
             ep_runtime = d.get("episode_run_time", [])
-            
             extra = f"\n📅 *Сезонов:* {seasons} | *Серий:* {episodes}"
             if ep_runtime:
-                ep_min = ep_runtime[0]
-                extra += f"\n⏱ *Длительность серии:* ~{ep_min} мин"
-            
+                extra += f"\n⏱ *Длительность серии:* ~{ep_runtime[0]} мин"
             text = f"📺 *{title}*" + (f" / {d.get('original_name','')}" if d.get('original_name') and d.get('original_name') != title else "") + f" ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
         
         if poster: await q.message.reply_photo(photo=f"https://image.tmdb.org/t/p/w500{poster}", caption=text, parse_mode=ParseMode.MARKDOWN)
         else: await q.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         await q.message.delete()
-    except Exception as e:
-        logger.error(f"Movie info: {e}")
-        await q.message.edit_text("❌ Ошибка.")
+    except: await q.message.edit_text("❌ Ошибка.")
 
 async def flash_movie(update, context, query=None):
     if not query: await update.message.reply_text("❗ `флеш кино Интерстеллар`", parse_mode=ParseMode.MARKDOWN); return
