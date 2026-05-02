@@ -31,7 +31,7 @@ try:
 except: pass
 
 try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp", "SpeechRecognition", "pydub"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
 except: pass
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -83,7 +83,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("🎲 Ролл"), KeyboardButton("🪙 Монетка")],
      [KeyboardButton("🌤 Погода"), KeyboardButton("🎵 Музыка")],
      [KeyboardButton("📧 Почта (5 мин)"), KeyboardButton("⚡ Флеш")],
-     [KeyboardButton("💡 Предложить")]],
+     [KeyboardButton("💡 Предложить"), KeyboardButton("😂 Мем")]],
     resize_keyboard=True, is_persistent=True
 )
 
@@ -180,37 +180,24 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
     if not city:
         await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN)
         return
-
     msg = await update.message.reply_text(f"🌤 Ищу погоду в *{city}*...", parse_mode=ParseMode.MARKDOWN)
-
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.openweathermap.org/data/2.5/weather",
-                params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru"}
-            ) as r:
+            async with s.get(f"https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru"}) as r:
                 if r.status != 200:
                     await msg.edit_text(f"❌ Город *{city}* не найден.", parse_mode=ParseMode.MARKDOWN)
                     return
                 current = await r.json()
-
             lat, lon = current["coord"]["lat"], current["coord"]["lon"]
             timezone_offset = current["timezone"]
-
-            async with s.get(
-                "https://api.openweathermap.org/data/2.5/forecast",
-                params={"lat": lat, "lon": lon, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru", "cnt": 4}
-            ) as r:
+            async with s.get("https://api.openweathermap.org/data/2.5/forecast", params={"lat": lat, "lon": lon, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru", "cnt": 4}) as r:
                 forecast = await r.json() if r.status == 200 else None
-
         icons = {"Clear":"☀️","Clouds":"☁️","Rain":"🌧","Snow":"❄️","Thunderstorm":"⛈","Drizzle":"🌦","Mist":"🌫","Fog":"🌫"}
         icon = icons.get(current["weather"][0]["main"], "🌡")
-
         tz = timezone(timedelta(seconds=timezone_offset))
         local_time = datetime.now(timezone.utc).astimezone(tz).strftime("%H:%M")
         sunrise = datetime.fromtimestamp(current["sys"]["sunrise"], tz=tz).strftime("%H:%M")
         sunset = datetime.fromtimestamp(current["sys"]["sunset"], tz=tz).strftime("%H:%M")
-
         text = (
             f"{icon} *Погода в {current['name']}*\n"
             f"🕐 Местное время: {local_time}\n\n"
@@ -218,143 +205,84 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
             f"💧 Влажность: {current['main']['humidity']}%\n"
             f"💨 Ветер: {current['wind']['speed']} м/с\n"
             f"📋 {current['weather'][0]['description'].capitalize()}\n"
-            f"🌅 Восход: {sunrise}\n"
-            f"🌇 Закат: {sunset}"
+            f"🌅 Восход: {sunrise}\n🌇 Закат: {sunset}"
         )
-
         if forecast and forecast.get("list"):
             text += "\n\n📊 *Прогноз:*\n"
             for item in forecast["list"][:4]:
                 ft = datetime.fromtimestamp(item["dt"], tz=tz).strftime("%H:%M")
                 fi = icons.get(item["weather"][0]["main"], "🌡")
                 text += f"{fi} {ft} — *{item['main']['temp']:.0f}°C* ({item['weather'][0]['description'].capitalize()})\n"
-
         await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-
     except Exception as e:
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
-# ─── ГОЛОС (ПОЛНОСТЬЮ ПЕРЕПИСАН) ─────────────────────────────────────────────
+# ─── ГОЛОС (СТАРЫЙ РАБОЧИЙ МЕТОД) ────────────────────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    
     if not msg.reply_to_message:
         await msg.reply_text("❗ Ответь на голосовое сообщение командой `флеш голос`", parse_mode=ParseMode.MARKDOWN)
         return
-    
-    target = msg.reply_to_message.voice or msg.reply_to_message.video_note or msg.reply_to_message.audio
+    target = msg.reply_to_message.voice or msg.reply_to_message.video_note
     if not target:
-        await msg.reply_text("❗ Ответь на голосовое, видеосообщение или аудио.")
+        await msg.reply_text("❗ Ответь на голосовое или видеосообщение.")
         return
-    
     status = await msg.reply_text("🎙 Распознаю речь...")
     tmpdir = None
-    
     try:
         tmpdir = tempfile.mkdtemp()
-        
-        # Скачиваем файл
         file = await context.bot.get_file(target.file_id)
         ogg_path = os.path.join(tmpdir, "voice.ogg")
         wav_path = os.path.join(tmpdir, "voice.wav")
         await file.download_to_drive(ogg_path)
         
-        # Конвертируем в WAV 16kHz mono
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-i", ogg_path,
-            "-ar", "16000",
-            "-ac", "1",
-            "-f", "wav",
-            wav_path
-        ]
-        
+        # Конвертация
+        ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
+            ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.DEVNULL
         )
-        _, stderr = await proc.communicate()
+        await proc.wait()
         
-        if proc.returncode != 0:
-            logger.error(f"FFmpeg error: {stderr.decode()}")
-            await status.edit_text("❌ Ошибка обработки аудио.")
-            return
-        
-        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
-            await status.edit_text("❌ Аудиофайл пустой.")
-            return
-        
-        # Отправляем в Google Speech API
+        # Отправка в Google Speech API
         import requests as _rq
+        loop = asyncio.get_event_loop()
         
         def recognize():
             with open(wav_path, "rb") as f:
-                audio_bytes = f.read()
-            
-            url = "https://www.google.com/speech-api/v2/recognize"
-            params = {
-                "output": "json",
-                "lang": "ru-RU",
-                "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-            }
-            headers = {
-                "Content-Type": "audio/l16; rate=16000"
-            }
-            
-            resp = _rq.post(url, params=params, data=audio_bytes, headers=headers, timeout=30)
-            
-            if resp.status_code != 200:
-                logger.error(f"Google API status: {resp.status_code}")
-                return None
-            
+                audio_data = f.read()
+            resp = _rq.post(
+                "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
+                data=audio_data,
+                headers={"Content-Type": "audio/l16; rate=16000"}
+            )
             result = ""
             for line in resp.text.strip().split("\n"):
-                if not line.strip():
-                    continue
+                if not line.strip(): continue
                 try:
                     data = json.loads(line)
-                    alternatives = data.get("result", [])
-                    if alternatives:
-                        for alt in alternatives[0].get("alternative", []):
-                            transcript = alt.get("transcript", "")
-                            if transcript:
-                                result += transcript + " "
-                except Exception as e:
-                    logger.error(f"Parse error: {e}")
-                    continue
-            
-            return result.strip() if result.strip() else None
+                    for r in data.get("result", []):
+                        for alt in r.get("alternative", []):
+                            result += alt.get("transcript", "") + " "
+                except: continue
+            return result.strip()
         
-        loop = asyncio.get_event_loop()
         text = await loop.run_in_executor(None, recognize)
-        
         if text:
-            await status.edit_text(
-                f"🎙 *Распознанный текст:*\n\n{text}",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await status.edit_text(
-                "🎙 *Речь не распознана.*\n\n"
-                "Попробуй:\n"
-                "• Говорить чётче и громче\n"
-                "• Записать в тихом месте\n"
-                "• Использовать другое голосовое"
-            )
-    
+            await status.edit_text("🎙 Речь не распознана. Попробуй говорить чётче.")
     except Exception as e:
-        logger.error(f"Voice error: {e}")
+        logger.error(f"Voice: {e}")
         await status.edit_text("❌ Ошибка распознавания.")
     finally:
-        if tmpdir and os.path.exists(tmpdir):
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
-import shutil as _shutil
 def _find_ffmpeg():
-    p = _shutil.which("ffmpeg")
+    p = shutil.which("ffmpeg")
     if p: return p
     try:
         import imageio_ffmpeg
@@ -365,6 +293,7 @@ def _find_ffmpeg():
         if os.path.exists(path): return path
         for f in _glob.glob(f"{path}/**/ffmpeg", recursive=True): return f
     return "ffmpeg"
+
 _FFMPEG = _find_ffmpeg()
 
 SC_OPTS = {"quiet":True,"no_warnings":True,"ffmpeg_location":_FFMPEG,"http_headers":{"User-Agent":"Mozilla/5.0","Referer":"https://soundcloud.com/"}}
@@ -540,14 +469,12 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         async with aiohttp.ClientSession() as s:
             async with s.get(f"https://api.themoviedb.org/3/{media}/{tmdb_id}", params={"api_key":TMDB_KEY,"language":"ru-RU"}) as r:
                 d = await r.json()
-        
         title = d.get("title") if media == "movie" else d.get("name", title_cb or "?")
         year = (d.get("release_date") if media == "movie" else d.get("first_air_date") or year_cb or "")[:4]
         rating = d.get("vote_average", 0)
         genres = ", ".join([g["name"] for g in d.get("genres", [])[:3]])
         overview = d.get("overview") or "Нет описания"
         poster = d.get("poster_path", "")
-        
         if media == "movie":
             runtime = d.get("runtime", 0)
             if runtime:
@@ -566,7 +493,6 @@ async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if ep_runtime:
                 extra += f"\n⏱ *Длительность серии:* ~{ep_runtime[0]} мин"
             text = f"📺 *{title}*" + (f" / {d.get('original_name','')}" if d.get('original_name') and d.get('original_name') != title else "") + f" ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
-        
         if poster: await q.message.reply_photo(photo=f"https://image.tmdb.org/t/p/w500{poster}", caption=text, parse_mode=ParseMode.MARKDOWN)
         else: await q.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         await q.message.delete()
@@ -599,13 +525,59 @@ async def flash_translate(update, context, query=None):
     except: await update.message.reply_text("❌ Ошибка.")
 
 async def flash_meme(update, context):
+    # Пробуем meme-api
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://meme-api.com/gimme/rus") as r:
                 d = await r.json()
                 if d.get("url"): await update.message.reply_photo(photo=d["url"], caption=d.get("title","😂")); return
     except: pass
-    await update.message.reply_text("😅 Недоступны.")
+    
+    # Пробуем imgflip
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.imgflip.com/get_memes") as r:
+                data = await r.json()
+                memes = data.get("data", {}).get("memes", [])
+                if memes:
+                    meme = random.choice(memes)
+                    await update.message.reply_photo(photo=meme["url"], caption=f"😂 {meme['name']}")
+                    return
+    except: pass
+    
+    # Пробуем pikabu
+    try:
+        async with aiohttp.ClientSession() as s:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
+                html = await r.text()
+        imgs = re.findall(r'data-large-image="([^"]+)"', html)
+        if not imgs:
+            imgs = re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
+        if imgs:
+            url = random.choice(imgs[:20])
+            await update.message.reply_photo(photo=url, caption="😂 Мем с Пикабу")
+            return
+    except: pass
+    
+    # Пробуем reddit
+    try:
+        ru_subs = ["ru_memes", "RusMemes", "Pikabu"]
+        async with aiohttp.ClientSession() as s:
+            for sub in ru_subs:
+                try:
+                    async with s.get(f"https://www.reddit.com/r/{sub}/random/.json", headers={"User-Agent": "Mozilla/5.0"}) as r:
+                        if r.status != 200: continue
+                        data = await r.json()
+                        post = data[0]["data"]["children"][0]["data"]
+                        url = post.get("url", "")
+                        if url and any(url.endswith(ext) for ext in [".jpg",".png",".jpeg",".gif"]):
+                            await update.message.reply_photo(photo=url, caption=f"😂 {post.get('title', 'Мем')}")
+                            return
+                except: continue
+    except: pass
+    
+    await update.message.reply_text("😅 Мемы временно недоступны.")
 
 # ─── ОБРАБОТЧИК ТЕКСТА ───────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -621,6 +593,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🎵 музыка": await update.message.reply_text("🎵 `флеш музыка запрос`", parse_mode=ParseMode.MARKDOWN); return
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
     elif text == "💡 предложить": await flash_idea_start(update, context); return
+    elif text == "😂 мем": await flash_meme(update, context); return
 
     url = extract_url(raw)
     if url:
