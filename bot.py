@@ -218,132 +218,139 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
-# ─── ГОЛОС (НОВЫЙ МЕТОД ЧЕРЕЗ GOOGLE SPEECH v1) ────────────────────────────
+# ─── ГОЛОС (ЧЕРЕЗ SUPA API - БЕСПЛАТНО) ─────────────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message:
         await msg.reply_text("❗ Ответь на голосовое сообщение командой `флеш голос`", parse_mode=ParseMode.MARKDOWN)
         return
+    
     target = msg.reply_to_message.voice or msg.reply_to_message.video_note
     if not target:
         await msg.reply_text("❗ Ответь на голосовое или видеосообщение.")
         return
     
-    status = await msg.reply_text("🎙 Распознаю речь...")
+    status = await msg.reply_text("🎙 Скачиваю голосовое...")
     tmpdir = None
     
     try:
         tmpdir = tempfile.mkdtemp()
+        
+        # Скачиваем файл
         file = await context.bot.get_file(target.file_id)
         ogg_path = os.path.join(tmpdir, "voice.ogg")
-        flac_path = os.path.join(tmpdir, "voice.flac")
+        wav_path = os.path.join(tmpdir, "voice.wav")
         await file.download_to_drive(ogg_path)
         
-        # Конвертируем в FLAC (Google Speech API v1 принимает FLAC)
+        await status.edit_text("🎙 Обрабатываю аудио...")
+        
+        # Конвертируем в WAV
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "flac", flac_path,
+            ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
+            stderr=asyncio.subprocess.PIPE
         )
-        await proc.wait()
+        _, stderr = await proc.communicate()
         
-        if not os.path.exists(flac_path) or os.path.getsize(flac_path) == 0:
+        if proc.returncode != 0:
+            logger.error(f"FFmpeg error: {stderr.decode()}")
             await status.edit_text("❌ Не удалось обработать аудио.")
             return
         
-        # Отправляем в Google Speech API v1 (REST)
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+            await status.edit_text("❌ Аудиофайл пустой.")
+            return
+        
+        await status.edit_text("🎙 Распознаю речь...")
+        
+        # Отправляем в Google Speech API (прямой вызов, без async)
         import requests as _rq
         
-        def recognize_v1():
-            with open(flac_path, "rb") as f:
-                audio_data = f.read()
-            
-            # Конвертируем в base64
-            import base64
-            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-            
-            # Google Speech-to-Text API v1
-            url = "https://speech.googleapis.com/v1/speech:recognize"
-            params = {"key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"}
-            
-            body = {
-                "config": {
-                    "encoding": "FLAC",
-                    "sampleRateHertz": 16000,
-                    "languageCode": "ru-RU",
-                    "model": "default"
-                },
-                "audio": {
-                    "content": audio_base64
+        def recognize_speech():
+            try:
+                with open(wav_path, "rb") as f:
+                    audio_data = f.read()
+                
+                # Google Speech API v2
+                url = "https://www.google.com/speech-api/v2/recognize"
+                params = {
+                    "output": "json",
+                    "lang": "ru-RU",
+                    "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
                 }
-            }
-            
-            resp = _rq.post(url, params=params, json=body, timeout=30)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                results = data.get("results", [])
-                if results:
-                    alternatives = results[0].get("alternatives", [])
-                    if alternatives:
-                        return alternatives[0].get("transcript", "").strip()
-            
-            return None
-        
-        def recognize_v2():
-            """Fallback: старый метод через speech-api v2"""
-            with open(flac_path, "rb") as f:
-                audio_data = f.read()
-            
-            # Конвертируем в WAV для старого API
-            wav_path = os.path.join(tmpdir, "voice.wav")
-            proc2 = subprocess.run(
-                [ffmpeg, "-y", "-i", flac_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
-                capture_output=True
-            )
-            
-            with open(wav_path, "rb") as f:
-                wav_data = f.read()
-            
-            resp = _rq.post(
-                "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
-                data=wav_data,
-                headers={"Content-Type": "audio/l16; rate=16000"}
-            )
-            
-            result = ""
-            for line in resp.text.strip().split("\n"):
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                    for r in data.get("result", []):
-                        for alt in r.get("alternative", []):
-                            result += alt.get("transcript", "") + " "
-                except:
-                    continue
-            return result.strip() if result.strip() else None
+                headers = {"Content-Type": "audio/l16; rate=16000"}
+                
+                resp = _rq.post(url, params=params, data=audio_data, headers=headers, timeout=15)
+                
+                if resp.status_code != 200:
+                    logger.error(f"Google API returned {resp.status_code}: {resp.text[:200]}")
+                    return None
+                
+                result = ""
+                for line in resp.text.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        results = data.get("result", [])
+                        for r in results:
+                            for alt in r.get("alternative", []):
+                                transcript = alt.get("transcript", "")
+                                if transcript:
+                                    result += transcript + " "
+                    except json.JSONDecodeError:
+                        continue
+                
+                return result.strip() if result.strip() else None
+                
+            except Exception as e:
+                logger.error(f"Recognize error: {e}")
+                return None
         
         loop = asyncio.get_event_loop()
-        
-        # Пробуем v1 API
-        text = await loop.run_in_executor(None, recognize_v1)
-        
-        # Если не сработало — пробуем v2
-        if not text:
-            text = await loop.run_in_executor(None, recognize_v2)
+        text = await loop.run_in_executor(None, recognize_speech)
         
         if text:
             await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await status.edit_text(
-                "🎙 *Речь не распознана.*\n\n"
-                "Попробуй:\n"
-                "• Говорить громче и чётче\n"
-                "• Записать в тихом месте\n"
-                "• Использовать другое сообщение"
-            )
+            # Пробуем через requests напрямую (без Content-Type заголовка)
+            def recognize_alt():
+                try:
+                    with open(wav_path, "rb") as f:
+                        audio_data = f.read()
+                    
+                    url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+                    resp = _rq.post(url, data=audio_data, timeout=15)
+                    
+                    result = ""
+                    for line in resp.text.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                            results = data.get("result", [])
+                            for r in results:
+                                for alt in r.get("alternative", []):
+                                    result += alt.get("transcript", "") + " "
+                        except:
+                            continue
+                    return result.strip() if result.strip() else None
+                except:
+                    return None
+            
+            text2 = await loop.run_in_executor(None, recognize_alt)
+            
+            if text2:
+                await status.edit_text(f"🎙 *Расшифровка:*\n\n{text2}", parse_mode=ParseMode.MARKDOWN)
+            else:
+                await status.edit_text(
+                    "🎙 *Речь не распознана.*\n\n"
+                    "Попробуй:\n"
+                    "• Говорить громче и чётче\n"
+                    "• Записать в тихом месте\n"
+                    "• Использовать другое сообщение"
+                )
     
     except Exception as e:
         logger.error(f"Voice error: {e}")
@@ -597,15 +604,12 @@ async def flash_translate(update, context, query=None):
     except: await update.message.reply_text("❌ Ошибка.")
 
 async def flash_meme(update, context):
-    # Пробуем meme-api
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://meme-api.com/gimme/rus") as r:
                 d = await r.json()
                 if d.get("url"): await update.message.reply_photo(photo=d["url"], caption=d.get("title","😂")); return
     except: pass
-    
-    # Пробуем imgflip
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.imgflip.com/get_memes") as r:
@@ -616,8 +620,6 @@ async def flash_meme(update, context):
                     await update.message.reply_photo(photo=meme["url"], caption=f"😂 {meme['name']}")
                     return
     except: pass
-    
-    # Пробуем pikabu
     try:
         async with aiohttp.ClientSession() as s:
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -627,28 +629,9 @@ async def flash_meme(update, context):
         if not imgs:
             imgs = re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
         if imgs:
-            url = random.choice(imgs[:20])
-            await update.message.reply_photo(photo=url, caption="😂 Мем с Пикабу")
+            await update.message.reply_photo(photo=random.choice(imgs[:20]), caption="😂 Мем с Пикабу")
             return
     except: pass
-    
-    # Пробуем reddit
-    try:
-        ru_subs = ["ru_memes", "RusMemes", "Pikabu"]
-        async with aiohttp.ClientSession() as s:
-            for sub in ru_subs:
-                try:
-                    async with s.get(f"https://www.reddit.com/r/{sub}/random/.json", headers={"User-Agent": "Mozilla/5.0"}) as r:
-                        if r.status != 200: continue
-                        data = await r.json()
-                        post = data[0]["data"]["children"][0]["data"]
-                        url = post.get("url", "")
-                        if url and any(url.endswith(ext) for ext in [".jpg",".png",".jpeg",".gif"]):
-                            await update.message.reply_photo(photo=url, caption=f"😂 {post.get('title', 'Мем')}")
-                            return
-                except: continue
-    except: pass
-    
     await update.message.reply_text("😅 Мемы временно недоступны.")
 
 # ─── ОБРАБОТЧИК ТЕКСТА ───────────────────────────────────────────────────────
@@ -717,6 +700,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def error_handler(update, context):
+        logger.error(f"Error: {context.error}")
         if "Conflict" in str(context.error): await asyncio.sleep(5)
 
     app.add_error_handler(error_handler)
