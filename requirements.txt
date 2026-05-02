@@ -1,6 +1,6 @@
-python-telegram-bot==21.10
-aiohttp==3.10.11
-aiofiles==24.1.0
-yt-dlp==2024.12.6
-requests==2.32.3
-psutil==6.1.1
+python-telegram-bot
+aiohttp
+aiofiles
+yt-dlp
+requests
+psutil
