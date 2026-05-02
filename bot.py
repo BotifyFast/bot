@@ -31,7 +31,7 @@ try:
 except: pass
 
 try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp", "SpeechRecognition"], check=True)
 except: pass
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -54,6 +54,40 @@ pending_music = {}
 pending_idea = set()
 active_timers = {}
 
+# Словарь сокращений городов
+CITY_ALIASES = {
+    "екб": "Екатеринбург",
+    "спб": "Санкт-Петербург",
+    "мск": "Москва",
+    "кст": "Костанай",
+    "нск": "Новосибирск",
+    "кзн": "Казань",
+    "влг": "Волгоград",
+    "сам": "Самара",
+    "рнд": "Ростов-на-Дону",
+    "члб": "Челябинск",
+    "омск": "Омск",
+    "уфа": "Уфа",
+    "пермь": "Пермь",
+    "влд": "Владивосток",
+    "соч": "Сочи",
+    "крд": "Краснодар",
+    "нн": "Нижний Новгород",
+    "тюм": "Тюмень",
+    "ирк": "Иркутск",
+    "хбр": "Хабаровск",
+    "томск": "Томск",
+    "кем": "Кемерово",
+    "алм": "Алматы",
+    "аст": "Астана",
+    "лн": "Лондон",
+    "нью": "Нью-Йорк",
+    "пек": "Пекин",
+    "тк": "Токио",
+    "дуб": "Дубай",
+    "стм": "Стамбул",
+}
+
 BAD_WORDS = ["порно", "porn", "секс", "sex", "xxx", "18+", "эротика", "хентай", "hentai"]
 SHAME_RESPONSES = [
     "🫣 АЙ-АЙ-АЙ! Иди лучше Машу и Медведя смотри!",
@@ -68,6 +102,13 @@ def extract_url(t):
 def is_supported_url(url): return any(d in url.lower() for d in SUPPORTED_DOMAINS)
 def is_audio_url(url): return "soundcloud.com" in url.lower()
 def is_tg_url(url): return bool(TG_PATTERN.search(url))
+
+def resolve_city(city_input: str) -> str:
+    """Преобразует сокращение города в полное название"""
+    city_lower = city_input.lower().strip()
+    if city_lower in CITY_ALIASES:
+        return CITY_ALIASES[city_lower]
+    return city_input
 
 def cleanup_temp():
     try:
@@ -100,7 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚡ *Привет! Я Flash Bot!*\n\n"
         "🎲 `флеш ролл` — бросок 1-100\n"
-        "🌤 `флеш погода [город]` — погода\n"
+        "🌤 `флеш погода [город]` — погода (можно сокращённо: Мск, Спб, Екб)\n"
         "🪙 `флеш монетка` — орёл или решка\n"
         "🎙 `флеш голос` — голосовое → текст\n"
         "🎵 `флеш музыка [название]` — выбрать из 5 треков\n"
@@ -175,11 +216,15 @@ async def flash_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
-# ─── ПОГОДА ───────────────────────────────────────────────────────────────────
+# ─── ПОГОДА (С СОКРАЩЕНИЯМИ) ────────────────────────────────────────────────
 async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city=None):
     if not city:
-        await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`\n💡 Можно сокращённо: Мск, Спб, Екб, Кст", parse_mode=ParseMode.MARKDOWN)
         return
+    
+    # Расшифровка сокращения
+    city = resolve_city(city)
+    
     msg = await update.message.reply_text(f"🌤 Ищу погоду в *{city}*...", parse_mode=ParseMode.MARKDOWN)
     try:
         async with aiohttp.ClientSession() as s:
@@ -218,7 +263,7 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
-# ─── ГОЛОС (ЧЕРЕЗ SUPA API - БЕСПЛАТНО) ─────────────────────────────────────
+# ─── ГОЛОС (ЧЕРЕЗ SPEECH_RECOGNITION) ───────────────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message:
@@ -230,7 +275,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❗ Ответь на голосовое или видеосообщение.")
         return
     
-    status = await msg.reply_text("🎙 Скачиваю голосовое...")
+    status = await msg.reply_text("🎙 Распознаю речь...")
     tmpdir = None
     
     try:
@@ -242,118 +287,58 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wav_path = os.path.join(tmpdir, "voice.wav")
         await file.download_to_drive(ogg_path)
         
-        await status.edit_text("🎙 Обрабатываю аудио...")
-        
         # Конвертируем в WAV
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         proc = await asyncio.create_subprocess_exec(
             ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.DEVNULL
         )
-        _, stderr = await proc.communicate()
+        await proc.wait()
         
-        if proc.returncode != 0:
-            logger.error(f"FFmpeg error: {stderr.decode()}")
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
             await status.edit_text("❌ Не удалось обработать аудио.")
             return
         
-        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
-            await status.edit_text("❌ Аудиофайл пустой.")
-            return
+        # Используем speech_recognition
+        import speech_recognition as sr
         
-        await status.edit_text("🎙 Распознаю речь...")
-        
-        # Отправляем в Google Speech API (прямой вызов, без async)
-        import requests as _rq
-        
-        def recognize_speech():
+        def recognize():
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio = recognizer.record(source)
+            
+            # Пробуем Google (бесплатный, без ключа)
             try:
-                with open(wav_path, "rb") as f:
-                    audio_data = f.read()
-                
-                # Google Speech API v2
-                url = "https://www.google.com/speech-api/v2/recognize"
-                params = {
-                    "output": "json",
-                    "lang": "ru-RU",
-                    "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-                }
-                headers = {"Content-Type": "audio/l16; rate=16000"}
-                
-                resp = _rq.post(url, params=params, data=audio_data, headers=headers, timeout=15)
-                
-                if resp.status_code != 200:
-                    logger.error(f"Google API returned {resp.status_code}: {resp.text[:200]}")
-                    return None
-                
-                result = ""
-                for line in resp.text.strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                        results = data.get("result", [])
-                        for r in results:
-                            for alt in r.get("alternative", []):
-                                transcript = alt.get("transcript", "")
-                                if transcript:
-                                    result += transcript + " "
-                    except json.JSONDecodeError:
-                        continue
-                
-                return result.strip() if result.strip() else None
-                
-            except Exception as e:
-                logger.error(f"Recognize error: {e}")
-                return None
+                return recognizer.recognize_google(audio, language="ru-RU")
+            except sr.UnknownValueError:
+                pass
+            except sr.RequestError:
+                pass
+            
+            # Пробуем через другой сервис
+            try:
+                return recognizer.recognize_sphinx(audio, language="ru-RU")
+            except:
+                pass
+            
+            return None
         
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, recognize_speech)
+        text = await loop.run_in_executor(None, recognize)
         
         if text:
             await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            # Пробуем через requests напрямую (без Content-Type заголовка)
-            def recognize_alt():
-                try:
-                    with open(wav_path, "rb") as f:
-                        audio_data = f.read()
-                    
-                    url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-                    resp = _rq.post(url, data=audio_data, timeout=15)
-                    
-                    result = ""
-                    for line in resp.text.strip().split("\n"):
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                            results = data.get("result", [])
-                            for r in results:
-                                for alt in r.get("alternative", []):
-                                    result += alt.get("transcript", "") + " "
-                        except:
-                            continue
-                    return result.strip() if result.strip() else None
-                except:
-                    return None
-            
-            text2 = await loop.run_in_executor(None, recognize_alt)
-            
-            if text2:
-                await status.edit_text(f"🎙 *Расшифровка:*\n\n{text2}", parse_mode=ParseMode.MARKDOWN)
-            else:
-                await status.edit_text(
-                    "🎙 *Речь не распознана.*\n\n"
-                    "Попробуй:\n"
-                    "• Говорить громче и чётче\n"
-                    "• Записать в тихом месте\n"
-                    "• Использовать другое сообщение"
-                )
+            await status.edit_text(
+                "🎙 *Речь не распознана.*\n\n"
+                "Попробуй:\n"
+                "• Говорить громче и чётче\n"
+                "• Записать в тихом месте"
+            )
     
     except Exception as e:
-        logger.error(f"Voice error: {e}")
+        logger.error(f"Voice: {e}")
         await status.edit_text("❌ Ошибка распознавания.")
     finally:
         if tmpdir and os.path.exists(tmpdir):
@@ -626,11 +611,8 @@ async def flash_meme(update, context):
             async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
                 html = await r.text()
         imgs = re.findall(r'data-large-image="([^"]+)"', html)
-        if not imgs:
-            imgs = re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
-        if imgs:
-            await update.message.reply_photo(photo=random.choice(imgs[:20]), caption="😂 Мем с Пикабу")
-            return
+        if not imgs: imgs = re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
+        if imgs: await update.message.reply_photo(photo=random.choice(imgs[:20]), caption="😂 Мем с Пикабу"); return
     except: pass
     await update.message.reply_text("😅 Мемы временно недоступны.")
 
@@ -644,7 +626,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🎲 ролл": await flash_roll(update, context); return
     elif text == "🪙 монетка": await flash_coin(update, context); return
     elif text == "⚡ флеш": await flash_help(update, context); return
-    elif text == "🌤 погода": await update.message.reply_text("🌤 `флеш погода Город`", parse_mode=ParseMode.MARKDOWN); return
+    elif text == "🌤 погода": await update.message.reply_text("🌤 `флеш погода Город`\n💡 Можно: Мск, Спб, Екб", parse_mode=ParseMode.MARKDOWN); return
     elif text == "🎵 музыка": await update.message.reply_text("🎵 `флеш музыка запрос`", parse_mode=ParseMode.MARKDOWN); return
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
     elif text == "💡 предложить": await flash_idea_start(update, context); return
@@ -700,7 +682,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def error_handler(update, context):
-        logger.error(f"Error: {context.error}")
         if "Conflict" in str(context.error): await asyncio.sleep(5)
 
     app.add_error_handler(error_handler)
