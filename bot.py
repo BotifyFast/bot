@@ -218,7 +218,7 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка получения погоды.")
 
-# ─── ГОЛОС (СТАРЫЙ РАБОЧИЙ МЕТОД) ────────────────────────────────────────────
+# ─── ГОЛОС (НОВЫЙ МЕТОД ЧЕРЕЗ GOOGLE SPEECH v1) ────────────────────────────
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message:
@@ -228,57 +228,129 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target:
         await msg.reply_text("❗ Ответь на голосовое или видеосообщение.")
         return
+    
     status = await msg.reply_text("🎙 Распознаю речь...")
     tmpdir = None
+    
     try:
         tmpdir = tempfile.mkdtemp()
         file = await context.bot.get_file(target.file_id)
         ogg_path = os.path.join(tmpdir, "voice.ogg")
-        wav_path = os.path.join(tmpdir, "voice.wav")
+        flac_path = os.path.join(tmpdir, "voice.flac")
         await file.download_to_drive(ogg_path)
         
-        # Конвертация
+        # Конвертируем в FLAC (Google Speech API v1 принимает FLAC)
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
+            ffmpeg, "-y", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "flac", flac_path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
         
-        # Отправка в Google Speech API
-        import requests as _rq
-        loop = asyncio.get_event_loop()
+        if not os.path.exists(flac_path) or os.path.getsize(flac_path) == 0:
+            await status.edit_text("❌ Не удалось обработать аудио.")
+            return
         
-        def recognize():
-            with open(wav_path, "rb") as f:
+        # Отправляем в Google Speech API v1 (REST)
+        import requests as _rq
+        
+        def recognize_v1():
+            with open(flac_path, "rb") as f:
                 audio_data = f.read()
+            
+            # Конвертируем в base64
+            import base64
+            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+            
+            # Google Speech-to-Text API v1
+            url = "https://speech.googleapis.com/v1/speech:recognize"
+            params = {"key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"}
+            
+            body = {
+                "config": {
+                    "encoding": "FLAC",
+                    "sampleRateHertz": 16000,
+                    "languageCode": "ru-RU",
+                    "model": "default"
+                },
+                "audio": {
+                    "content": audio_base64
+                }
+            }
+            
+            resp = _rq.post(url, params=params, json=body, timeout=30)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                if results:
+                    alternatives = results[0].get("alternatives", [])
+                    if alternatives:
+                        return alternatives[0].get("transcript", "").strip()
+            
+            return None
+        
+        def recognize_v2():
+            """Fallback: старый метод через speech-api v2"""
+            with open(flac_path, "rb") as f:
+                audio_data = f.read()
+            
+            # Конвертируем в WAV для старого API
+            wav_path = os.path.join(tmpdir, "voice.wav")
+            proc2 = subprocess.run(
+                [ffmpeg, "-y", "-i", flac_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+                capture_output=True
+            )
+            
+            with open(wav_path, "rb") as f:
+                wav_data = f.read()
+            
             resp = _rq.post(
                 "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
-                data=audio_data,
+                data=wav_data,
                 headers={"Content-Type": "audio/l16; rate=16000"}
             )
+            
             result = ""
             for line in resp.text.strip().split("\n"):
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 try:
                     data = json.loads(line)
                     for r in data.get("result", []):
                         for alt in r.get("alternative", []):
                             result += alt.get("transcript", "") + " "
-                except: continue
-            return result.strip()
+                except:
+                    continue
+            return result.strip() if result.strip() else None
         
-        text = await loop.run_in_executor(None, recognize)
+        loop = asyncio.get_event_loop()
+        
+        # Пробуем v1 API
+        text = await loop.run_in_executor(None, recognize_v1)
+        
+        # Если не сработало — пробуем v2
+        if not text:
+            text = await loop.run_in_executor(None, recognize_v2)
+        
         if text:
             await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await status.edit_text("🎙 Речь не распознана. Попробуй говорить чётче.")
+            await status.edit_text(
+                "🎙 *Речь не распознана.*\n\n"
+                "Попробуй:\n"
+                "• Говорить громче и чётче\n"
+                "• Записать в тихом месте\n"
+                "• Использовать другое сообщение"
+            )
+    
     except Exception as e:
-        logger.error(f"Voice: {e}")
+        logger.error(f"Voice error: {e}")
         await status.edit_text("❌ Ошибка распознавания.")
     finally:
-        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir and os.path.exists(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
 def _find_ffmpeg():
