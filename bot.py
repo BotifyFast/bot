@@ -668,6 +668,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
+    # Устанавливаем ffmpeg если его нет
+    try:
+        subprocess.run(["apt-get", "update"], capture_output=True, timeout=30)
+        subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True, timeout=60)
+        logger.info("ffmpeg установлен")
+    except:
+        try:
+            subprocess.run(["apk", "add", "ffmpeg"], capture_output=True, timeout=30)
+            logger.info("ffmpeg установлен через apk")
+        except:
+            logger.warning("Не удалось установить ffmpeg автоматически")
+    
     import requests
     try: requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=5)
     except: pass
@@ -693,6 +705,3 @@ def main():
         app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url, drop_pending_updates=True)
     else:
         app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
