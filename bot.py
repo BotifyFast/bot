@@ -54,6 +54,9 @@ URL_REGEX = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 pending_music = {}
 pending_idea = set()
 active_timers = {}
+# Анонимный чат: пары пользователей
+anon_chat_queue = []  # очередь ждущих
+anon_chat_pairs = {}  # {user_id: partner_id}
 
 CITY_ALIASES = {
     "екб": "Екатеринбург", "спб": "Санкт-Петербург", "мск": "Москва",
@@ -92,7 +95,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("🎲 Ролл"), KeyboardButton("🪙 Монетка")],
      [KeyboardButton("🌤 Погода"), KeyboardButton("🎵 Музыка")],
      [KeyboardButton("📧 Почта (5 мин)"), KeyboardButton("⚡ Флеш")],
-     [KeyboardButton("💡 Предложить"), KeyboardButton("😂 Мем")]],
+     [KeyboardButton("💡 Предложить"), KeyboardButton("😂 Мем")],
+     [KeyboardButton("💬 Анонимный чат")]],
     resize_keyboard=True, is_persistent=True
 )
 
@@ -123,6 +127,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 `флеш перевод [текст]` — перевод на русский\n"
         "😂 `флеш мем` — случайный мем\n"
         "📥 `флеш тг [ссылка]` — скачать из ТГ\n"
+        "💬 `флеш чат` — анонимный чат с незнакомцем\n"
         "💡 `флеш предложить` — идея для бота\n"
         "⚡ `флеш` — список команд\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok/Instagram — скачаю!"
@@ -268,7 +273,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ─── МУЗЫКА ───────────────────────────────────────────────────────────────────
+# ─── МУЗЫКА (ИСПРАВЛЕНО) ────────────────────────────────────────────────────
 def _find_ffmpeg():
     p = shutil.which("ffmpeg")
     if p: return p
@@ -282,6 +287,9 @@ _FFMPEG = _find_ffmpeg()
 SC_OPTS = {"quiet":True,"no_warnings":True,"ffmpeg_location":_FFMPEG,"http_headers":{"User-Agent":"Mozilla/5.0","Referer":"https://soundcloud.com/"}}
 
 async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+    if not query:
+        await update.message.reply_text("🎵 `флеш музыка название трека`", parse_mode=ParseMode.MARKDOWN)
+        return
     msg = await update.message.reply_text(f"🔍 Ищу *{query}*...", parse_mode=ParseMode.MARKDOWN)
     try:
         import yt_dlp
@@ -306,8 +314,11 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
             res.append({"title":t,"url":url,"duration":d})
             btns.append([InlineKeyboardButton(f"🔊 {i+1}. {t[:38]} ({m}:{s:02d})", callback_data=f"dl_music:{uid}:{i}")])
         pending_music[uid] = res
-        await msg.edit_text(f"🎵 Результаты:", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(btns))
-    except: await msg.edit_text("❌ Ошибка.")
+        src_name = "SoundCloud" if src == "sc" else "YouTube"
+        await msg.edit_text(f"🎵 Найдено на *{src_name}*:\n\nВыбери трек:", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(btns))
+    except Exception as e:
+        logger.error(f"Music: {e}")
+        await msg.edit_text("❌ Ошибка поиска.")
 
 async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -316,20 +327,33 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
     tr = pending_music.get(int(uid), [])
     if int(idx) >= len(tr): await q.message.edit_text("❌ Устарело."); return
     t = tr[int(idx)]
-    await q.message.edit_text(f"⬇️ Скачиваю...", parse_mode=ParseMode.MARKDOWN)
+    await q.message.edit_text(f"⬇️ Скачиваю *{t['title']}*...", parse_mode=ParseMode.MARKDOWN)
     tmpdir = None
     try:
         tmpdir = tempfile.mkdtemp()
         import yt_dlp
+        ydl_opts = {
+            **SC_OPTS,
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            "max_filesize": 48 * 1024 * 1024,
+        }
         def dl():
-            with yt_dlp.YoutubeDL({**SC_OPTS,"format":"bestaudio/best","outtmpl":os.path.join(tmpdir,"%(title)s.%(ext)s"),"postprocessors":[{"key":"FFmpegExtractAudio","preferredcodec":"mp3"}]}) as y: y.download([t["url"]])
+            with yt_dlp.YoutubeDL(ydl_opts) as y: y.download([t["url"]])
         await asyncio.get_event_loop().run_in_executor(None, dl)
-        files = list(Path(tmpdir).glob("*.mp3")) or list(Path(tmpdir).glob("*.*"))
+        files = list(Path(tmpdir).glob("*.mp3"))
+        if not files: files = [f for f in Path(tmpdir).iterdir() if f.suffix in (".mp3",".m4a",".opus",".ogg",".webm")]
         if not files: raise FileNotFoundError("Файл не найден")
+        if files[0].stat().st_size > 50*1024*1024:
+            await q.message.edit_text("⚠️ Файл > 50 МБ.")
+            return
         async with aiofiles.open(files[0],"rb") as f: data = await f.read()
-        await q.message.reply_audio(audio=data, title=t["title"], duration=t["duration"])
+        await q.message.reply_audio(audio=data, title=t["title"], duration=t["duration"], caption=f"🎵 {t['title']}")
         await q.message.delete()
-    except: await q.message.edit_text("❌ Ошибка.")
+    except Exception as e:
+        logger.error(f"Music DL: {e}")
+        await q.message.edit_text("❌ Не удалось скачать. Попробуй другой трек.")
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True); gc.collect()
 
@@ -400,6 +424,108 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
     except: await msg.edit_text("❌ Ошибка.")
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True); gc.collect()
+
+# ─── АНОНИМНЫЙ ЧАТ ───────────────────────────────────────────────────────────
+async def flash_anon_chat_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск собеседника для анонимного чата"""
+    if not is_private(update):
+        await update.message.reply_text("💬 Анонимный чат работает только в личных сообщениях боту.")
+        return
+    
+    user_id = update.effective_user.id
+    
+    # Проверяем, не в чате ли уже
+    if user_id in anon_chat_pairs:
+        await update.message.reply_text("💬 Ты уже в анонимном чате! Напиши `/stop_chat` чтобы выйти.")
+        return
+    
+    # Проверяем очередь
+    if user_id in anon_chat_queue:
+        await update.message.reply_text("⏳ Ты уже в очереди. Ждём собеседника...")
+        return
+    
+    # Если есть кто-то в очереди — соединяем
+    if anon_chat_queue:
+        partner_id = anon_chat_queue.pop(0)
+        anon_chat_pairs[user_id] = partner_id
+        anon_chat_pairs[partner_id] = user_id
+        
+        await update.message.reply_text(
+            "💬 *Собеседник найден!*\n\n"
+            "Вы анонимны — ваши имена скрыты.\n"
+            "Все сообщения будут пересылаться друг другу.\n"
+            "Для выхода напиши `стоп` или `/stop_chat`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await context.bot.send_message(
+            partner_id,
+            "💬 *Собеседник найден!*\n\n"
+            "Вы анонимны — ваши имена скрыты.\n"
+            "Все сообщения будут пересылаться друг другу.\n"
+            "Для выхода напиши `стоп` или `/stop_chat`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        # Добавляем в очередь
+        anon_chat_queue.append(user_id)
+        await update.message.reply_text(
+            "⏳ *Ищу собеседника...*\n\n"
+            "Ты в очереди. Как только кто-то зайдёт — я соединю вас.\n"
+            "Для отмены напиши `отмена`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def flash_anon_chat_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выход из анонимного чата"""
+    user_id = update.effective_user.id
+    
+    # Удаляем из очереди если там был
+    if user_id in anon_chat_queue:
+        anon_chat_queue.remove(user_id)
+        await update.message.reply_text("❌ Поиск собеседника отменён.")
+        return
+    
+    # Выходим из чата
+    if user_id in anon_chat_pairs:
+        partner_id = anon_chat_pairs[user_id]
+        del anon_chat_pairs[user_id]
+        del anon_chat_pairs[partner_id]
+        
+        await update.message.reply_text("👋 Ты вышел из анонимного чата.")
+        try:
+            await context.bot.send_message(partner_id, "👋 Собеседник покинул чат.\nНапиши `флеш чат` чтобы найти нового!")
+        except: pass
+        return
+    
+    await update.message.reply_text("Ты не в анонимном чате. Напиши `флеш чат` чтобы начать!")
+
+async def anon_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылка сообщений в анонимном чате"""
+    if not update.message or not update.message.text:
+        return
+    
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if user_id not in anon_chat_pairs:
+        return
+    
+    # Команды выхода
+    if text.lower() in ["стоп", "/stop_chat", "отмена"]:
+        await flash_anon_chat_stop(update, context)
+        return
+    
+    partner_id = anon_chat_pairs[user_id]
+    
+    try:
+        await context.bot.send_message(
+            partner_id,
+            f"💬 *Аноним:* {text}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Anon chat: {e}")
+        await update.message.reply_text("❌ Не удалось отправить сообщение. Возможно собеседник отключился.")
 
 # ─── КУРС ВАЛЮТ ──────────────────────────────────────────────────────────────
 async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,18 +607,64 @@ async def flash_translate(update, context, query=None):
         await update.message.reply_text(f"🌍 *Перевод:*\n{''.join([item[0] for item in data[0] if item[0]])}", parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
+# ─── МЕМЫ (ИСПРАВЛЕНО) ──────────────────────────────────────────────────────
 async def flash_meme(update, context):
+    # Способ 1: Reddit (самый надёжный)
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get("https://meme-api.com/gimme/rus") as r:
+            async with s.get("https://www.reddit.com/r/memes/random/.json", headers={"User-Agent": "Mozilla/5.0"}) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    post = data[0]["data"]["children"][0]["data"]
+                    url = post.get("url_overridden_by_dest") or post.get("url", "")
+                    title = post.get("title", "Мем")
+                    if url and any(url.endswith(ext) for ext in [".jpg",".png",".jpeg",".gif"]):
+                        await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+                        return
+    except: pass
+    
+    # Способ 2: meme-api
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://meme-api.com/gimme") as r:
                 d = await r.json()
                 if d.get("url"): await update.message.reply_photo(photo=d["url"], caption=d.get("title","😂")); return
     except: pass
-    await update.message.reply_text("😅 Мемы временно недоступны.")
+    
+    # Способ 3: imgflip
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.imgflip.com/get_memes") as r:
+                data = await r.json()
+                memes = data.get("data", {}).get("memes", [])
+                if memes:
+                    meme = random.choice(memes)
+                    await update.message.reply_photo(photo=meme["url"], caption=f"😂 {meme['name']}")
+                    return
+    except: pass
+    
+    # Способ 4: pikabu
+    try:
+        async with aiohttp.ClientSession() as s:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with s.get("https://pikabu.ru/tag/%D0%BC%D0%B5%D0%BC%D1%8B/hot", headers=headers) as r:
+                html = await r.text()
+        imgs = re.findall(r'data-large-image="([^"]+)"', html)
+        if not imgs: imgs = re.findall(r'src="(https://cs\d+\.pikabu\.ru/post_img/[^"]+\.(?:jpg|png|jpeg))"', html)
+        if imgs: await update.message.reply_photo(photo=random.choice(imgs[:20]), caption="😂 Мем с Пикабу"); return
+    except: pass
+    
+    await update.message.reply_text("😅 Мемы временно недоступны. Попробуй позже.")
 
 # ─── ОБРАБОТЧИК ТЕКСТА ───────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
+    
+    # Проверяем анонимный чат
+    if update.effective_user.id in anon_chat_pairs:
+        await anon_chat_message(update, context)
+        return
+    
     uid, raw, text = update.effective_user.id, update.message.text.strip(), update.message.text.lower().strip()
 
     if uid in pending_idea: await flash_idea_receive(update, context); return
@@ -505,6 +677,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
     elif text == "💡 предложить": await flash_idea_start(update, context); return
     elif text == "😂 мем": await flash_meme(update, context); return
+    elif text == "💬 анонимный чат": await flash_anon_chat_start(update, context); return
 
     url = extract_url(raw)
     if url:
@@ -536,9 +709,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "монетка": await flash_coin(update, context)
     elif cmd == "погода": await flash_weather(update, context, city=arg or None)
     elif cmd == "голос": await flash_voice(update, context)
-    elif cmd == "музыка":
-        if arg: await flash_music_search(update, context, arg)
-        else: await update.message.reply_text("❗ `флеш музыка запрос`", parse_mode=ParseMode.MARKDOWN)
+    elif cmd == "музыка": await flash_music_search(update, context, arg)
     elif cmd == "почта": await flash_mail(update, context)
     elif cmd == "курс": await flash_rate(update, context)
     elif cmd == "крипта": await flash_crypto(update, context)
@@ -549,23 +720,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "сократить": await flash_short(update, context, url=arg or None)
     elif cmd == "перевод": await flash_translate(update, context, query=arg or None)
     elif cmd == "мем": await flash_meme(update, context)
+    elif cmd == "чат": await flash_anon_chat_start(update, context)
     elif cmd == "тг":
         if arg:
             try:
                 match = TG_PATTERN.search(arg)
-                chat_id_str, message_id = match.groups()
-                chat_ids = []
-                if not chat_id_str.lstrip('-').isdigit(): chat_ids.append(f"@{chat_id_str}")
-                else:
-                    chat_ids.append(int(chat_id_str))
-                    if not chat_id_str.startswith("-100"): chat_ids.append(int(f"-100{chat_id_str}"))
-                for cid in chat_ids:
-                    try:
-                        await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=cid, message_id=int(message_id))
-                        return
-                    except: continue
+                if match:
+                    chat_id_str, message_id = match.groups()
+                    chat_ids = []
+                    if not chat_id_str.lstrip('-').isdigit(): chat_ids.append(f"@{chat_id_str}")
+                    else:
+                        chat_ids.append(int(chat_id_str))
+                        if not chat_id_str.startswith("-100"): chat_ids.append(int(f"-100{chat_id_str}"))
+                    for cid in chat_ids:
+                        try:
+                            await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=cid, message_id=int(message_id))
+                            return
+                        except: continue
             except: pass
-        await update.message.reply_text("❌ Не удалось скачать из ТГ.")
+            await update.message.reply_text("❌ Не удалось.")
+        else:
+            await update.message.reply_text("❗ `флеш тг https://t.me/...`", parse_mode=ParseMode.MARKDOWN)
     elif cmd in ("предложить", "идея"): await flash_idea_start(update, context)
     else: await flash_help(update, context)
 
@@ -579,6 +754,7 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop_chat", flash_anon_chat_stop))
     app.add_handler(CallbackQueryHandler(download_music_callback, pattern="^dl_music:"))
     app.add_handler(CallbackQueryHandler(guerrilla_callback, pattern="^gm_"))
     app.add_handler(CallbackQueryHandler(movie_info_callback, pattern="^movie_info:"))
