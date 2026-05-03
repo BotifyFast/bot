@@ -32,11 +32,33 @@ if not TOKEN:
 
 try:
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"],
-        check=True, timeout=60
+        [sys.executable, "-m", "pip", "install", "-q", "--upgrade",
+         "yt-dlp", "python-telegram-bot==21.9"],
+        check=True, timeout=90
     )
 except Exception as e:
-    print(f"⚠️ yt-dlp upgrade failed: {e}")
+    print(f"⚠️ pip upgrade failed: {e}")
+
+# Если ffmpeg не найден — ставим через apt (Railway поддерживает Debian)
+def _ensure_ffmpeg():
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return
+    except Exception:
+        pass
+    print("ffmpeg not found, installing via apt...")
+    try:
+        subprocess.run(
+            ["apt-get", "install", "-y", "-q", "ffmpeg"],
+            check=True, timeout=180,
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+        )
+        print("ffmpeg installed via apt OK")
+    except Exception as e:
+        print(f"apt install ffmpeg failed: {e}")
+
+_ensure_ffmpeg()
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
