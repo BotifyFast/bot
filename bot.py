@@ -39,7 +39,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ChatType, ParseMode
 
 # ═══════════════ КОНФИГ ═══════════════
-TOKEN = os.environ.get("BOT_TOKEN", "8638601182:AAFmKfrIz5VlMSiZb4_OxAONzPmyEyP07s0").strip()
+TOKEN = os.environ.get("BOT_TOKEN", "8518299800:AAF8W7j7spj7MxAJH119dbU3ybSwcPH_TmE").strip()
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "c2b2631749aead62cfdc86b394e6399f").strip()
 OWNER_ID = int(os.environ.get("OWNER_ID", "1202730193"))
 TMDB_KEY = os.environ.get("TMDB_KEY", "8265bd1679663a7ea12ac168da84d2e8").strip()
