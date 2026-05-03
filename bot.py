@@ -76,7 +76,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
      [KeyboardButton("🌤 Погода"), KeyboardButton("🎵 Музыка")],
      [KeyboardButton("📧 Почта (5 мин)"), KeyboardButton("⚡ Флеш")],
      [KeyboardButton("💡 Предложить"), KeyboardButton("😂 Мем")],
-     [KeyboardButton("💬 Анонимный чат"), KeyboardButton("🍆 Пиписька")]],
+     [KeyboardButton("💬 Анонимный чат")]],
     resize_keyboard=True, is_persistent=True
 )
 
@@ -114,7 +114,6 @@ def cleanup_temp():
 # ═══════════════ СТАРТ ═══════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Выходим из анонимного чата при старте
     if user_id in anon_chat_pairs:
         await exit_anon_chat(user_id, context)
     
@@ -137,7 +136,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "😂 `флеш мем` — случайный мем\n"
         "📥 `флеш тг [ссылка]` — скачать из ТГ\n"
         "💬 `флеш чат` — анонимный чат\n"
-        "🍆 `флеш пиписька` — ( ͡° ͜ʖ ͡°)\n"
         "💡 `флеш предложить` — идея для бота\n\n"
         "🔗 *Скинь ссылку* из YouTube/TikTok — скачаю!"
     )
@@ -146,7 +144,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def flash_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
-# ═══════════════ БАЗОВЫЕ ФУНКЦИИ ═══════════════
 async def flash_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     roll = random.randint(1, 100)
@@ -227,58 +224,75 @@ async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city
         logger.error(f"Weather: {e}")
         await msg.edit_text("❌ Ошибка.")
 
-# ═══════════════ ГОЛОС (ПРОСТОЙ МЕТОД) ═══════════════
+# ═══════════════ ГОЛОС (speech_recognition + ffmpeg) ═══════════════
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message:
         await msg.reply_text("❗ Ответь на голосовое `флеш голос`", parse_mode=ParseMode.MARKDOWN)
         return
-    target = msg.reply_to_message.voice or msg.reply_to_message.video_note
+    target = msg.reply_to_message.voice or msg.reply_to_message.video_note or msg.reply_to_message.audio
     if not target:
-        await msg.reply_text("❗ Ответь на голосовое или видеосообщение.")
+        await msg.reply_text("❗ Ответь на голосовое, видео или аудио.")
         return
     
-    status = await msg.reply_text("🎙 Распознаю...")
+    status = await msg.reply_text("🎙 Скачиваю...")
     tmpdir = None
+    
     try:
         tmpdir = tempfile.mkdtemp()
-        file = await context.bot.get_file(target.file_id)
-        ogg_path = os.path.join(tmpdir, "voice.ogg")
-        await file.download_to_drive(ogg_path)
         
-        import requests as _rq
-        loop = asyncio.get_event_loop()
+        # Скачиваем
+        file = await context.bot.get_file(target.file_id)
+        input_path = os.path.join(tmpdir, "input.ogg")
+        wav_path = os.path.join(tmpdir, "output.wav")
+        await file.download_to_drive(input_path)
+        
+        await status.edit_text("🎙 Конвертирую...")
+        
+        # Конвертация ffmpeg
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+            await status.edit_text("❌ Ошибка конвертации.")
+            return
+        
+        await status.edit_text("🎙 Распознаю...")
+        
+        # Распознавание
+        import speech_recognition as sr
         
         def recognize():
-            with open(ogg_path, "rb") as f:
-                audio = f.read()
-            resp = _rq.post(
-                "https://www.google.com/speech-api/v2/recognize?output=json&lang=ru-RU&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
-                data=audio,
-                headers={"Content-Type": "audio/ogg; codecs=opus"},
-                timeout=30
-            )
-            result = ""
-            for line in resp.text.strip().split("\n"):
-                if not line.strip(): continue
-                try:
-                    for alt in json.loads(line).get("result",[])[0].get("alternative",[]):
-                        result += alt.get("transcript","") + " "
-                except: continue
-            return result.strip() or None
+            r = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio = r.record(source)
+            try:
+                return r.recognize_google(audio, language="ru-RU")
+            except sr.UnknownValueError:
+                return None
+            except sr.RequestError:
+                return None
         
+        loop = asyncio.get_event_loop()
         text = await loop.run_in_executor(None, recognize)
+        
         if text:
             await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await status.edit_text("🎙 Не распознано.")
+            await status.edit_text("🎙 Не распознано. Попробуй говорить чётче и громче.")
+    
     except Exception as e:
         logger.error(f"Voice: {e}")
-        await status.edit_text("❌ Ошибка.")
+        await status.edit_text("❌ Ошибка распознавания.")
     finally:
-        if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir and os.path.exists(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ═══════════════ МУЗЫКА (ТОЛЬКО YOUTUBE) ═══════════════
+# ═══════════════ МУЗЫКА (SOUNDCLOUD + YOUTUBE) ═══════════════
 async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
     if not query:
         await update.message.reply_text("🎵 Укажи название: `флеш музыка Imagine Dragons`", parse_mode=ParseMode.MARKDOWN)
@@ -289,14 +303,40 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         import yt_dlp
         
-        def search():
+        def search_sc():
+            opts = {
+                "quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://soundcloud.com/"
+                }
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(f"scsearch5:{query}", download=False)
+        
+        def search_yt():
             opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist"}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(f"ytsearch5:{query}", download=False)
         
         loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, search)
-        entries = [e for e in info.get("entries", []) if e] if info else []
+        
+        # Пробуем SoundCloud
+        source = "YouTube"
+        info = None
+        try:
+            info = await loop.run_in_executor(None, search_sc)
+            if info and info.get("entries"):
+                source = "SoundCloud"
+        except:
+            pass
+        
+        # Если SC не сработал — YouTube
+        if not info or not info.get("entries"):
+            info = await loop.run_in_executor(None, search_yt)
+        
+        entries = info.get("entries", []) if info else []
+        entries = [e for e in entries if e]
         
         if not entries:
             await msg.edit_text(f"❌ По запросу *{query}* ничего не найдено.", parse_mode=ParseMode.MARKDOWN)
@@ -305,10 +345,11 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         uid = update.effective_user.id
         results = []
         buttons = []
+        src_icon = "🔊" if source == "SoundCloud" else "▶️"
         
         for i, entry in enumerate(entries[:5]):
             title = entry.get("title") or f"Трек {i+1}"
-            url = entry.get("url") or entry.get("webpage_url") or ""
+            url = entry.get("webpage_url") or entry.get("url") or ""
             duration = int(entry.get("duration") or 0)
             
             if duration > 0:
@@ -317,11 +358,16 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
             else:
                 dur_str = "??:??"
             
-            results.append({"title": title, "url": url, "duration": duration})
-            buttons.append([InlineKeyboardButton(f"▶️ {i+1}. {title[:40]} [{dur_str}]", callback_data=f"dl_music:{uid}:{i}")])
+            results.append({"title": title, "url": url, "duration": duration, "source": source})
+            buttons.append([InlineKeyboardButton(f"{src_icon} {i+1}. {title[:40]} [{dur_str}]", callback_data=f"dl_music:{uid}:{i}")])
         
         pending_music[uid] = results
-        await msg.edit_text(f"🎵 *Найдено треков:* {len(entries)}\n\nВыбери для скачивания:", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+        
+        await msg.edit_text(
+            f"🎵 *Найдено на {source}*\n🔍 `{query}`\n\nВыбери трек:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
     
     except Exception as e:
         logger.error(f"Music search: {e}")
@@ -341,7 +387,8 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     
     track = tracks[idx]
-    await q.message.edit_text(f"⬇️ Скачиваю: *{track['title'][:50]}*", parse_mode=ParseMode.MARKDOWN)
+    source = track.get("source", "")
+    await q.message.edit_text(f"⬇️ Скачиваю с *{source}*:\n*{track['title'][:50]}*", parse_mode=ParseMode.MARKDOWN)
     
     tmpdir = None
     try:
@@ -353,6 +400,10 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
             "quiet": True, "no_warnings": True,
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://soundcloud.com/" if source == "SoundCloud" else "https://www.youtube.com/",
+            },
             "max_filesize": 48 * 1024 * 1024,
         }
         
@@ -380,7 +431,7 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
     
     except Exception as e:
         logger.error(f"Music DL: {e}")
-        await q.message.edit_text("❌ Не удалось скачать.")
+        await q.message.edit_text(f"❌ Не удалось скачать трек. Попробуй другой.")
     finally:
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True); gc.collect()
 
@@ -435,6 +486,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
             "format": "bestaudio/best" if audio else "bestvideo[height<=720]+bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
             "quiet": True, "merge_output_format": "mp4", "max_filesize": 48*1024*1024,
+            "http_headers": {"User-Agent": "Mozilla/5.0"}
         }
         if audio: opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
         def dl():
@@ -458,7 +510,6 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
 
 # ═══════════════ АНОНИМНЫЙ ЧАТ ═══════════════
 async def exit_anon_chat(user_id, context):
-    """Выход из анонимного чата"""
     if user_id in anon_chat_pairs:
         partner_id = anon_chat_pairs[user_id]
         del anon_chat_pairs[user_id]
@@ -473,7 +524,6 @@ async def exit_anon_chat(user_id, context):
     anon_chat_users.discard(user_id)
 
 async def find_new_partner(user_id, context):
-    """Поиск нового собеседника"""
     await exit_anon_chat(user_id, context)
     
     if anon_chat_queue:
@@ -483,23 +533,22 @@ async def find_new_partner(user_id, context):
         anon_chat_users.add(user_id)
         anon_chat_users.add(partner_id)
         
-        await context.bot.send_message(user_id, "💬 *Новый собеседник!*\nПиши что угодно — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
-        await context.bot.send_message(partner_id, "💬 *Новый собеседник!*\nПиши что угодно — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        await context.bot.send_message(user_id, "💬 *Собеседник найден!*\nПиши — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        await context.bot.send_message(partner_id, "💬 *Собеседник найден!*\nПиши — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
     else:
         anon_chat_queue.append(user_id)
         anon_chat_users.add(user_id)
-        await context.bot.send_message(user_id, "⏳ *Ищу собеседника...*\nЖди или нажми кнопку.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        await context.bot.send_message(user_id, "⏳ *Ищу собеседника...*\nЖди.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
 
 async def flash_anon_chat_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_private(update): await update.message.reply_text("💬 Только в личке."); return
     user_id = update.effective_user.id
     if user_id in anon_chat_pairs:
-        await update.message.reply_text("💬 Ты уже в чате! Используй кнопки.", reply_markup=ANON_CHAT_KEYBOARD)
+        await update.message.reply_text("💬 Ты уже в чате!", reply_markup=ANON_CHAT_KEYBOARD)
         return
     if user_id in anon_chat_queue:
-        await update.message.reply_text("⏳ Ты в очереди. Жди или нажми кнопку.", reply_markup=ANON_CHAT_KEYBOARD)
+        await update.message.reply_text("⏳ Ты в очереди.", reply_markup=ANON_CHAT_KEYBOARD)
         return
-    
     await find_new_partner(user_id, context)
 
 async def flash_anon_chat_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,16 +560,13 @@ async def anon_chat_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in anon_chat_pairs:
         partner_id = anon_chat_pairs[user_id]
-        # Отправляем сообщение партнёру что ушли
         try:
-            await context.bot.send_message(partner_id, "👋 Собеседник ищет нового.", reply_markup=ANON_CHAT_KEYBOARD)
+            await context.bot.send_message(partner_id, "👋 Собеседник ушёл. Ищу нового...", reply_markup=ANON_CHAT_KEYBOARD)
         except: pass
-        # Удаляем пару
         del anon_chat_pairs[user_id]
         del anon_chat_pairs[partner_id]
         anon_chat_users.discard(user_id)
         anon_chat_users.discard(partner_id)
-    
     await find_new_partner(user_id, context)
 
 async def anon_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -530,7 +576,6 @@ async def anon_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = update.message.text.strip()
     
-    # Кнопки анонимного чата
     if text == "➡️ Следующий":
         await anon_chat_next(update, context)
         return
@@ -545,7 +590,7 @@ async def anon_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(partner_id, f"💬 *Аноним:* {text}", parse_mode=ParseMode.MARKDOWN)
     except:
-        await update.message.reply_text("❌ Собеседник отключился. Ищи нового!", reply_markup=ANON_CHAT_KEYBOARD)
+        await update.message.reply_text("❌ Собеседник отключился.", reply_markup=ANON_CHAT_KEYBOARD)
         await exit_anon_chat(user_id, context)
 
 # ═══════════════ КУРС ВАЛЮТ ═══════════════
@@ -657,16 +702,12 @@ async def flash_meme(update, context):
     except: pass
     await update.message.reply_text("😅 Мемы временно недоступны.")
 
-async def flash_dick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/dick@pipisabot")
-
 # ═══════════════ ОБРАБОТЧИК ТЕКСТА ═══════════════
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
     user_id = update.effective_user.id
     
-    # Анонимный чат
     if user_id in anon_chat_pairs:
         await anon_chat_message(update, context)
         return
@@ -677,7 +718,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await flash_idea_receive(update, context)
         return
     
-    # Кнопки
     if text == "🎲 ролл": await flash_roll(update, context); return
     elif text == "🪙 монетка": await flash_coin(update, context); return
     elif text == "⚡ флеш": await flash_help(update, context); return
@@ -687,9 +727,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "💡 предложить": await flash_idea_start(update, context); return
     elif text == "😂 мем": await flash_meme(update, context); return
     elif text == "💬 анонимный чат": await flash_anon_chat_start(update, context); return
-    elif text == "🍆 пиписька": await flash_dick(update, context); return
     
-    # Ссылки
     url = extract_url(raw)
     if url:
         if is_tg_url(url):
@@ -707,7 +745,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
         if is_supported_url(url): await download_video(update, context, url); return
     
-    # Команды флеш
     if not text.startswith("флеш"): return
     parts = text.split(None, 2)
     if len(parts) == 1: await flash_help(update, context); return
@@ -730,7 +767,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "перевод": await flash_translate(update, context, query=arg or None)
     elif cmd == "мем": await flash_meme(update, context)
     elif cmd == "чат": await flash_anon_chat_start(update, context)
-    elif cmd == "пиписька": await flash_dick(update, context)
     elif cmd == "тг":
         if arg:
             try:
