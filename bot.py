@@ -40,55 +40,70 @@ except Exception as e:
     print(f"⚠️ pip upgrade failed: {e}")
 
 def _ensure_ffmpeg():
-    # Проверяем — может уже есть
-    for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
+    import stat as stat_mod, urllib.request
+
+    # 1. Проверяем стандартные пути
+    for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/app/ffmpeg"]:
         try:
             r = subprocess.run([candidate, "-version"], capture_output=True, timeout=5)
             if r.returncode == 0:
-                print(f"ffmpeg found: {candidate}")
+                print(f"ffmpeg OK: {candidate}")
                 return
         except Exception:
             pass
 
+    # 2. Пробуем apt-get (может сработать если репозитории есть)
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
-
-    # Обновляем списки пакетов
-    print("ffmpeg not found, trying apt-get update...")
     try:
-        subprocess.run(["apt-get", "update", "-q"], check=True, timeout=120, env=env)
-    except Exception as e:
-        print(f"apt-get update failed: {e}")
-
-    # Пробуем установить
-    print("Installing ffmpeg via apt...")
-    try:
-        subprocess.run(
-            ["apt-get", "install", "-y", "-q", "ffmpeg"],
-            check=True, timeout=300, env=env
-        )
-        print("ffmpeg installed via apt OK")
+        subprocess.run(["apt-get", "update", "-qq"], timeout=60, env=env)
+        subprocess.run(["apt-get", "install", "-y", "-q", "ffmpeg"], check=True, timeout=180, env=env)
+        print("ffmpeg installed via apt")
         return
-    except Exception as e:
-        print(f"apt install ffmpeg failed: {e}")
+    except Exception:
+        pass
 
-    # Запасной вариант — скачиваем статический бинарник ffmpeg
-    print("Trying static ffmpeg binary...")
+    # 3. Скачиваем готовый статический бинарник (не требует apt)
+    print("Downloading static ffmpeg binary...")
+    # Используем johnvansickle builds — маленький статический бинарник
+    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    tar_path = "/tmp/ffmpeg_static.tar.xz"
+    dest_dir = "/tmp/ffmpeg_bin"
+    dest_bin = "/usr/local/bin/ffmpeg"
+
     try:
-        import urllib.request, stat
-        ffmpeg_url = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-        tar_path = "/tmp/ffmpeg.tar.xz"
-        urllib.request.urlretrieve(ffmpeg_url, tar_path)
-        subprocess.run(["tar", "-xf", tar_path, "-C", "/tmp/"], check=True, timeout=60)
-        # Ищем бинарник
-        for f in Path("/tmp").rglob("ffmpeg"):
-            if f.is_file():
-                dest = Path("/usr/local/bin/ffmpeg")
-                shutil.copy2(str(f), str(dest))
-                dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-                print(f"Static ffmpeg installed to {dest}")
+        urllib.request.urlretrieve(url, tar_path)
+        os.makedirs(dest_dir, exist_ok=True)
+        subprocess.run(["tar", "-xf", tar_path, "-C", dest_dir, "--strip-components=1"],
+                       check=True, timeout=120)
+        ffmpeg_src = os.path.join(dest_dir, "ffmpeg")
+        if os.path.exists(ffmpeg_src):
+            shutil.copy2(ffmpeg_src, dest_bin)
+            st = os.stat(dest_bin)
+            os.chmod(dest_bin, st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
+            print(f"Static ffmpeg installed: {dest_bin}")
+            return
+    except Exception as e:
+        print(f"johnvansickle download failed: {e}")
+
+    # 4. Запасной URL — yt-dlp ffmpeg builds
+    try:
+        url2 = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+        urllib.request.urlretrieve(url2, tar_path)
+        os.makedirs(dest_dir, exist_ok=True)
+        subprocess.run(["tar", "-xf", tar_path, "-C", dest_dir, "--strip-components=1"],
+                       check=True, timeout=120)
+        for root, dirs, files in os.walk(dest_dir):
+            if "ffmpeg" in files:
+                src = os.path.join(root, "ffmpeg")
+                shutil.copy2(src, dest_bin)
+                st = os.stat(dest_bin)
+                os.chmod(dest_bin, st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
+                print(f"yt-dlp ffmpeg installed: {dest_bin}")
                 return
     except Exception as e:
-        print(f"Static ffmpeg install failed: {e}")
+        print(f"yt-dlp ffmpeg download failed: {e}")
+
+    print("WARNING: ffmpeg could not be installed. Music/voice features won't work.")
 
 _ensure_ffmpeg()
 
