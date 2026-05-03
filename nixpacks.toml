@@ -1,14 +1,8 @@
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ['python310', 'ffmpeg']
 
 [phases.install]
-cmds = ["pip install python-telegram-bot aiohttp aiofiles yt-dlp requests psutil"]
+cmds = ['pip install -r requirements.txt']
 
 [start]
-cmd = "python bot.py"
-
-[variables]
-BOT_TOKEN = "8638601182:AAHtMMvjO91O6gHtl1Fj7gR-nM2TUvN3FJg"
-WEATHER_API_KEY = "c2b2631749aead62cfdc86b394e6399f"
-OWNER_ID = "1202730193"
-TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8"
+cmd = 'python bot.py'
