@@ -4,3 +4,4 @@ aiofiles
 yt-dlp
 requests
 psutil
+SpeechRecognition
