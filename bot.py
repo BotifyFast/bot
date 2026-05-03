@@ -70,6 +70,25 @@ SHAME_RESPONSES = [
     "😤 ЧТО ЭТО ТАКОЕ?! Марш смотреть Смешариков!",
 ]
 
+def is_private(u): return u.effective_chat.type == ChatType.PRIVATE
+def extract_url(t):
+    m = URL_REGEX.search(t)
+    return m.group(0) if m else None
+def is_supported_url(url): return any(d in url.lower() for d in SUPPORTED_DOMAINS)
+def is_tg_url(url): return bool(TG_PATTERN.search(url))
+def resolve_city(city_input: str) -> str:
+    return CITY_ALIASES.get(city_input.lower().strip(), city_input)
+
+def cleanup_temp():
+    try:
+        tmp = tempfile.gettempdir()
+        for item in os.listdir(tmp):
+            path = os.path.join(tmp, item)
+            if os.path.isdir(path) and item.startswith('tmp'):
+                shutil.rmtree(path, ignore_errors=True)
+    except: pass
+    gc.collect()
+
 # ═══════════════ КЛАВИАТУРЫ ═══════════════
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("🎲 Ролл"), KeyboardButton("🪙 Монетка")],
@@ -91,25 +110,6 @@ MAGIC_BALL_ANSWERS = [
     "🌟 Хорошие перспективы", "✨ Знаки говорят — да", "💤 Пока не ясно",
     "⏳ Спроси позже", "🤐 Лучше не рассказывать", "❓ Сейчас нельзя предсказать",
 ]
-
-def is_private(u): return u.effective_chat.type == ChatType.PRIVATE
-def extract_url(t):
-    m = URL_REGEX.search(t)
-    return m.group(0) if m else None
-def is_supported_url(url): return any(d in url.lower() for d in SUPPORTED_DOMAINS)
-def is_tg_url(url): return bool(TG_PATTERN.search(url))
-def resolve_city(city_input: str) -> str:
-    return CITY_ALIASES.get(city_input.lower().strip(), city_input)
-
-def cleanup_temp():
-    try:
-        tmp = tempfile.gettempdir()
-        for item in os.listdir(tmp):
-            path = os.path.join(tmp, item)
-            if os.path.isdir(path) and item.startswith('tmp'):
-                shutil.rmtree(path, ignore_errors=True)
-    except: pass
-    gc.collect()
 
 # ═══════════════ СТАРТ ═══════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,10 +141,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KEYBOARD)
 
-async def flash_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+async def flash_help(update, context): await start(update, context)
 
-async def flash_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ═══════════════ РАЗВЛЕЧЕНИЯ ═══════════════
+async def flash_roll(update, context):
     user = update.effective_user
     roll = random.randint(1, 100)
     name = user.first_name or "Игрок"
@@ -155,34 +155,30 @@ async def flash_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: c = "💀 Провал!"
     await update.message.reply_text(f"🎲 *{name}* бросает кости...\n\nВыпало: *{roll}/100*\n{c}", parse_mode=ParseMode.MARKDOWN)
 
-async def flash_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_coin(update, context):
     await update.message.reply_text(f"Подбрасываю...\n\n{random.choice(['🦅 Орёл!', '🪙 Решка!'])}")
 
-async def flash_magic_ball(update: Update, context: ContextTypes.DEFAULT_TYPE, question: str = None):
-    if not question:
-        await update.message.reply_text("🎱 Задай вопрос: `флеш шар я выиграю?`", parse_mode=ParseMode.MARKDOWN)
-        return
+async def flash_magic_ball(update, context, question=None):
+    if not question: await update.message.reply_text("🎱 Задай вопрос: `флеш шар я выиграю?`", parse_mode=ParseMode.MARKDOWN); return
     await update.message.reply_text(f"🎱 *Вопрос:* {question}\n\n🔮 *Ответ:* {random.choice(MAGIC_BALL_ANSWERS)}", parse_mode=ParseMode.MARKDOWN)
 
-async def flash_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, minutes_str: str = None):
-    if not minutes_str:
-        await update.message.reply_text("⏰ Укажи: `флеш таймер 5`", parse_mode=ParseMode.MARKDOWN)
-        return
+async def flash_timer(update, context, minutes_str=None):
+    if not minutes_str: await update.message.reply_text("⏰ Укажи: `флеш таймер 5`", parse_mode=ParseMode.MARKDOWN); return
     try:
         minutes = int(minutes_str)
         if not 1 <= minutes <= 120: await update.message.reply_text("⏰ 1-120 мин."); return
     except: await update.message.reply_text("⏰ Число."); return
-    user_id, chat_id = update.effective_user.id, update.effective_chat.id
+    uid, cid = update.effective_user.id, update.effective_chat.id
     finish = datetime.now() + timedelta(minutes=minutes)
-    active_timers[user_id] = finish
+    active_timers[uid] = finish
     await update.message.reply_text(f"⏰ *Таймер {minutes} мин.*\nЗакончится в {finish.strftime('%H:%M:%S')}", parse_mode=ParseMode.MARKDOWN)
     await asyncio.sleep(minutes * 60)
-    if user_id in active_timers:
-        try: await context.bot.send_message(chat_id, f"⏰ *Время вышло!*", parse_mode=ParseMode.MARKDOWN)
+    if uid in active_timers:
+        try: await context.bot.send_message(cid, "⏰ *Время вышло!*", parse_mode=ParseMode.MARKDOWN)
         except: pass
-        del active_timers[user_id]
+        del active_timers[uid]
 
-async def flash_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_crypto(update, context):
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true") as r:
@@ -191,38 +187,35 @@ async def flash_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🪙 *Крипта:*\n₿ BTC: *${btc.get('usd','?'):,.0f}* ({btc.get('usd_24h_change',0):+.2f}%)\n♦️ ETH: *${eth.get('usd','?'):,.0f}* ({eth.get('usd_24h_change',0):+.2f}%)", parse_mode=ParseMode.MARKDOWN)
     except: await update.message.reply_text("❌ Ошибка.")
 
-async def flash_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city=None):
-    if not city:
-        await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN)
-        return
+# ═══════════════ ПОГОДА ═══════════════
+async def flash_weather(update, context, city=None):
+    if not city: await update.message.reply_text("❗ Укажи город: `флеш погода Алматы`", parse_mode=ParseMode.MARKDOWN); return
     city = resolve_city(city)
     msg = await update.message.reply_text(f"🌤 Ищу погоду в *{city}*...", parse_mode=ParseMode.MARKDOWN)
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru"}) as r:
                 if r.status != 200: await msg.edit_text(f"❌ Город *{city}* не найден.", parse_mode=ParseMode.MARKDOWN); return
-                current = await r.json()
-            lat, lon = current["coord"]["lat"], current["coord"]["lon"]
-            timezone_offset = current["timezone"]
+                c = await r.json()
+            lat, lon = c["coord"]["lat"], c["coord"]["lon"]
+            tzo = c["timezone"]
             async with s.get("https://api.openweathermap.org/data/2.5/forecast", params={"lat": lat, "lon": lon, "appid": WEATHER_API_KEY, "units": "metric", "lang": "ru", "cnt": 4}) as r:
-                forecast = await r.json() if r.status == 200 else None
+                fc = await r.json() if r.status == 200 else None
         icons = {"Clear":"☀️","Clouds":"☁️","Rain":"🌧","Snow":"❄️","Thunderstorm":"⛈","Drizzle":"🌦","Mist":"🌫","Fog":"🌫"}
-        icon = icons.get(current["weather"][0]["main"], "🌡")
-        tz = timezone(timedelta(seconds=timezone_offset))
-        local_time = datetime.now(timezone.utc).astimezone(tz).strftime("%H:%M")
-        sunrise = datetime.fromtimestamp(current["sys"]["sunrise"], tz=tz).strftime("%H:%M")
-        sunset = datetime.fromtimestamp(current["sys"]["sunset"], tz=tz).strftime("%H:%M")
-        text = f"{icon} *Погода в {current['name']}*\n🕐 Местное время: {local_time}\n\n🌡 *{current['main']['temp']:.0f}°C* (ощущается {current['main']['feels_like']:.0f}°C)\n💧 Влажность: {current['main']['humidity']}%\n💨 Ветер: {current['wind']['speed']} м/с\n📋 {current['weather'][0]['description'].capitalize()}\n🌅 Восход: {sunrise}\n🌇 Закат: {sunset}"
-        if forecast and forecast.get("list"):
+        icon = icons.get(c["weather"][0]["main"], "🌡")
+        tz = timezone(timedelta(seconds=tzo))
+        lt = datetime.now(timezone.utc).astimezone(tz).strftime("%H:%M")
+        sr = datetime.fromtimestamp(c["sys"]["sunrise"], tz=tz).strftime("%H:%M")
+        ss = datetime.fromtimestamp(c["sys"]["sunset"], tz=tz).strftime("%H:%M")
+        text = f"{icon} *Погода в {c['name']}*\n🕐 {lt}\n\n🌡 *{c['main']['temp']:.0f}°C* (ощущается {c['main']['feels_like']:.0f}°C)\n💧 {c['main']['humidity']}%\n💨 {c['wind']['speed']} м/с\n📋 {c['weather'][0]['description'].capitalize()}\n🌅 {sr}\n🌇 {ss}"
+        if fc and fc.get("list"):
             text += "\n\n📊 *Прогноз:*\n"
-            for item in forecast["list"][:4]:
+            for item in fc["list"][:4]:
                 ft = datetime.fromtimestamp(item["dt"], tz=tz).strftime("%H:%M")
                 fi = icons.get(item["weather"][0]["main"], "🌡")
-                text += f"{fi} {ft} — *{item['main']['temp']:.0f}°C* ({item['weather'][0]['description'].capitalize()})\n"
+                text += f"{fi} {ft} — *{item['main']['temp']:.0f}°C*\n"
         await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Weather: {e}")
-        await msg.edit_text("❌ Ошибка.")
+    except: await msg.edit_text("❌ Ошибка.")
 
 # ═══════════════ ГОЛОС (speech_recognition + ffmpeg) ═══════════════
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,7 +234,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tmpdir = tempfile.mkdtemp()
         
-        # Скачиваем
         file = await context.bot.get_file(target.file_id)
         input_path = os.path.join(tmpdir, "input.ogg")
         wav_path = os.path.join(tmpdir, "output.wav")
@@ -249,7 +241,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status.edit_text("🎙 Конвертирую...")
         
-        # Конвертация ffmpeg
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
             stdout=asyncio.subprocess.DEVNULL,
@@ -263,7 +254,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status.edit_text("🎙 Распознаю...")
         
-        # Распознавание
         import speech_recognition as sr
         
         def recognize():
@@ -283,7 +273,7 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text:
             await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await status.edit_text("🎙 Не распознано. Попробуй говорить чётче и громче.")
+            await status.edit_text("🎙 Не распознано. Попробуй говорить чётче.")
     
     except Exception as e:
         logger.error(f"Voice: {e}")
@@ -321,7 +311,6 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         loop = asyncio.get_event_loop()
         
-        # Пробуем SoundCloud
         source = "YouTube"
         info = None
         try:
@@ -331,7 +320,6 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except:
             pass
         
-        # Если SC не сработал — YouTube
         if not info or not info.get("entries"):
             info = await loop.run_in_executor(None, search_yt)
         
@@ -436,7 +424,7 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
         if tmpdir: shutil.rmtree(tmpdir, ignore_errors=True); gc.collect()
 
 # ═══════════════ ВРЕМЕННАЯ ПОЧТА ═══════════════
-async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_mail(update, context):
     if not is_private(update): await update.message.reply_text("📧 Только в личке."); return
     msg = await update.message.reply_text("📧 Создаю...")
     try:
@@ -446,7 +434,7 @@ async def flash_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"📧 `{d['email_addr']}`\n⏰ 10 мин", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Проверить", callback_data=f"gm_check:{d['sid_token']}")]]))
     except: await msg.edit_text("❌ Ошибка.")
 
-async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def guerrilla_callback(update, context):
     q = update.callback_query; await q.answer()
     if q.data.startswith("gm_check:"):
         try:
@@ -460,11 +448,11 @@ async def guerrilla_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except: await q.answer("❌ Ошибка.",show_alert=True)
 
 # ═══════════════ ПРЕДЛОЖЕНИЯ ═══════════════
-async def flash_idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_idea_start(update, context):
     pending_idea.add(update.effective_user.id)
     await update.message.reply_text("💡 *Жду идею!*", parse_mode=ParseMode.MARKDOWN)
 
-async def flash_idea_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_idea_receive(update, context):
     uid, text = update.effective_user.id, update.message.text.strip()
     if text.lower() == "отмена": pending_idea.discard(uid); await update.message.reply_text("❌ Отменено."); return
     try:
@@ -475,20 +463,20 @@ async def flash_idea_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ *Спасибо!*", parse_mode=ParseMode.MARKDOWN)
 
 # ═══════════════ СКАЧАТЬ ВИДЕО ═══════════════
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+async def download_video(update, context, url):
     msg = await update.message.reply_text("⬇️ Скачиваю...")
     tmpdir = None
     try:
         tmpdir = tempfile.mkdtemp()
         import yt_dlp
-        audio = "soundcloud.com" in url
+        is_sc = "soundcloud.com" in url
         opts = {
-            "format": "bestaudio/best" if audio else "bestvideo[height<=720]+bestaudio/best",
+            "format": "bestaudio/best" if is_sc else "bestvideo[height<=720]+bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
             "quiet": True, "merge_output_format": "mp4", "max_filesize": 48*1024*1024,
             "http_headers": {"User-Agent": "Mozilla/5.0"}
         }
-        if audio: opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+        if is_sc: opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
         def dl():
             with yt_dlp.YoutubeDL(opts) as y: return y.extract_info(url, download=True)
         info = await asyncio.get_event_loop().run_in_executor(None, dl)
@@ -496,12 +484,12 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         title = info.get("title","Файл") if info else "Файл"
         dur = int(info.get("duration") or 0) if info else 0
         await msg.edit_text("📤 Отправляю...")
-        files = list(Path(tmpdir).glob("*.mp3" if audio else "*.mp4"))
-        if not files: files = [f for f in Path(tmpdir).iterdir() if f.suffix in (".mp4",".mkv",".webm",".mov",".mp3",".m4a")]
+        files = list(Path(tmpdir).glob("*.mp3")) if is_sc else list(Path(tmpdir).glob("*.mp4"))
+        if not files: files = [f for f in Path(tmpdir).iterdir() if f.suffix.lower() in (".mp4",".mkv",".webm",".mov",".mp3",".m4a",".opus",".ogg")]
         if not files: raise FileNotFoundError("Файл не найден")
         if files[0].stat().st_size > 50*1024*1024: await msg.edit_text("⚠️ > 50 МБ."); return
         async with aiofiles.open(files[0],"rb") as f: data = await f.read()
-        if audio: await update.message.reply_audio(audio=data, title=title, duration=dur)
+        if is_sc: await update.message.reply_audio(audio=data, title=title, duration=dur)
         else: await update.message.reply_video(video=data, caption=f"🎬 {title}", duration=dur, supports_streaming=True)
         await msg.delete()
     except: await msg.edit_text("❌ Ошибка.")
@@ -517,7 +505,7 @@ async def exit_anon_chat(user_id, context):
         anon_chat_users.discard(user_id)
         anon_chat_users.discard(partner_id)
         try:
-            await context.bot.send_message(partner_id, "👋 Собеседник покинул чат.\nНапиши `флеш чат` чтобы найти нового!", reply_markup=MAIN_KEYBOARD)
+            await context.bot.send_message(partner_id, "👋 Собеседник покинул чат.\n`флеш чат` — найти нового!", reply_markup=MAIN_KEYBOARD)
         except: pass
     if user_id in anon_chat_queue:
         anon_chat_queue.remove(user_id)
@@ -525,76 +513,57 @@ async def exit_anon_chat(user_id, context):
 
 async def find_new_partner(user_id, context):
     await exit_anon_chat(user_id, context)
-    
     if anon_chat_queue:
-        partner_id = anon_chat_queue.pop(0)
-        anon_chat_pairs[user_id] = partner_id
-        anon_chat_pairs[partner_id] = user_id
+        pid = anon_chat_queue.pop(0)
+        anon_chat_pairs[user_id] = pid
+        anon_chat_pairs[pid] = user_id
         anon_chat_users.add(user_id)
-        anon_chat_users.add(partner_id)
-        
-        await context.bot.send_message(user_id, "💬 *Собеседник найден!*\nПиши — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
-        await context.bot.send_message(partner_id, "💬 *Собеседник найден!*\nПиши — это анонимно.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        anon_chat_users.add(pid)
+        await context.bot.send_message(user_id, "💬 *Собеседник найден!*", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        await context.bot.send_message(pid, "💬 *Собеседник найден!*", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
     else:
         anon_chat_queue.append(user_id)
         anon_chat_users.add(user_id)
-        await context.bot.send_message(user_id, "⏳ *Ищу собеседника...*\nЖди.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
+        await context.bot.send_message(user_id, "⏳ *Ищу собеседника...*", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
 
-async def flash_anon_chat_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_anon_chat_start(update, context):
     if not is_private(update): await update.message.reply_text("💬 Только в личке."); return
-    user_id = update.effective_user.id
-    if user_id in anon_chat_pairs:
-        await update.message.reply_text("💬 Ты уже в чате!", reply_markup=ANON_CHAT_KEYBOARD)
-        return
-    if user_id in anon_chat_queue:
-        await update.message.reply_text("⏳ Ты в очереди.", reply_markup=ANON_CHAT_KEYBOARD)
-        return
-    await find_new_partner(user_id, context)
+    uid = update.effective_user.id
+    if uid in anon_chat_pairs: await update.message.reply_text("💬 Ты уже в чате!", reply_markup=ANON_CHAT_KEYBOARD); return
+    await find_new_partner(uid, context)
 
-async def flash_anon_chat_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await exit_anon_chat(user_id, context)
-    await update.message.reply_text("👋 Ты вышел из чата.", reply_markup=MAIN_KEYBOARD)
+async def flash_anon_chat_stop(update, context):
+    uid = update.effective_user.id
+    await exit_anon_chat(uid, context)
+    await update.message.reply_text("👋 Вышел из чата.", reply_markup=MAIN_KEYBOARD)
 
-async def anon_chat_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in anon_chat_pairs:
-        partner_id = anon_chat_pairs[user_id]
-        try:
-            await context.bot.send_message(partner_id, "👋 Собеседник ушёл. Ищу нового...", reply_markup=ANON_CHAT_KEYBOARD)
+async def anon_chat_next(update, context):
+    uid = update.effective_user.id
+    if uid in anon_chat_pairs:
+        pid = anon_chat_pairs[uid]
+        try: await context.bot.send_message(pid, "👋 Собеседник ушёл.", reply_markup=ANON_CHAT_KEYBOARD)
         except: pass
-        del anon_chat_pairs[user_id]
-        del anon_chat_pairs[partner_id]
-        anon_chat_users.discard(user_id)
-        anon_chat_users.discard(partner_id)
-    await find_new_partner(user_id, context)
+        del anon_chat_pairs[uid], anon_chat_pairs[pid]
+        anon_chat_users.discard(uid)
+        anon_chat_users.discard(pid)
+    await find_new_partner(uid, context)
 
-async def anon_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def anon_chat_message(update, context):
     if not update.message or not update.message.text: return
-    user_id = update.effective_user.id
-    if user_id not in anon_chat_pairs: return
-    
+    uid = update.effective_user.id
+    if uid not in anon_chat_pairs: return
     text = update.message.text.strip()
-    
-    if text == "➡️ Следующий":
-        await anon_chat_next(update, context)
-        return
-    elif text == "🚪 Выйти":
-        await flash_anon_chat_stop(update, context)
-        return
-    elif text.lower() in ["стоп", "/stop_chat", "отмена"]:
-        await flash_anon_chat_stop(update, context)
-        return
-    
-    partner_id = anon_chat_pairs[user_id]
-    try:
-        await context.bot.send_message(partner_id, f"💬 *Аноним:* {text}", parse_mode=ParseMode.MARKDOWN)
+    if text == "➡️ Следующий": await anon_chat_next(update, context); return
+    elif text == "🚪 Выйти": await flash_anon_chat_stop(update, context); return
+    elif text.lower() in ["стоп", "/stop_chat"]: await flash_anon_chat_stop(update, context); return
+    pid = anon_chat_pairs[uid]
+    try: await context.bot.send_message(pid, f"💬 *Аноним:* {text}", parse_mode=ParseMode.MARKDOWN)
     except:
         await update.message.reply_text("❌ Собеседник отключился.", reply_markup=ANON_CHAT_KEYBOARD)
-        await exit_anon_chat(user_id, context)
+        await exit_anon_chat(uid, context)
 
 # ═══════════════ КУРС ВАЛЮТ ═══════════════
-async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def flash_rate(update, context):
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://open.er-api.com/v6/latest/USD") as r: data = await r.json()
@@ -603,8 +572,8 @@ async def flash_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: await update.message.reply_text("❌ Ошибка.")
 
 # ═══════════════ ПОИСК ФИЛЬМОВ ═══════════════
-async def search_movie_tv(update, query: str, media_type: str):
-    msg = await update.message.reply_text(f"🔍 Ищу...", parse_mode=ParseMode.MARKDOWN)
+async def search_movie_tv(update, query, media_type):
+    msg = await update.message.reply_text("🔍 Ищу...", parse_mode=ParseMode.MARKDOWN)
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"https://api.themoviedb.org/3/search/{media_type}", params={"api_key":TMDB_KEY,"query":query,"language":"ru-RU"}) as r:
@@ -618,30 +587,27 @@ async def search_movie_tv(update, query: str, media_type: str):
         await msg.edit_text(f"{'🎬 Фильмы' if media_type=='movie' else '📺 Сериалы'}:", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(btns))
     except: await msg.edit_text("❌ Ошибка.")
 
-async def movie_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def movie_info_callback(update, context):
     q = update.callback_query; await q.answer()
-    try: _, media, tmdb_id, title_cb, year_cb = q.data.split(":",4)
+    try: _, media, tid, tc, yc = q.data.split(":",4)
     except: await q.message.edit_text("❌ Ошибка."); return
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"https://api.themoviedb.org/3/{media}/{tmdb_id}", params={"api_key":TMDB_KEY,"language":"ru-RU"}) as r:
+            async with s.get(f"https://api.themoviedb.org/3/{media}/{tid}", params={"api_key":TMDB_KEY,"language":"ru-RU"}) as r:
                 d = await r.json()
-        title = d.get("title") if media == "movie" else d.get("name", title_cb or "?")
-        year = (d.get("release_date") if media == "movie" else d.get("first_air_date") or year_cb or "")[:4]
-        rating = d.get("vote_average", 0)
-        genres = ", ".join([g["name"] for g in d.get("genres", [])[:3]])
-        overview = d.get("overview") or "Нет описания"
-        poster = d.get("poster_path", "")
+        title = d.get("title") if media == "movie" else d.get("name", tc or "?")
+        year = (d.get("release_date") if media == "movie" else d.get("first_air_date") or yc or "")[:4]
+        rating, genres = d.get("vote_average",0), ", ".join([g["name"] for g in d.get("genres",[])][:3])
+        overview, poster = d.get("overview","Нет описания"), d.get("poster_path","")
         if media == "movie":
-            runtime = d.get("runtime", 0)
-            extra = f"\n⏱ *Длительность:* {runtime} мин" if runtime else ""
+            rt = d.get("runtime",0)
+            extra = f"\n⏱ *{rt} мин*" if rt else ""
             text = f"🎬 *{title}* ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
         else:
-            seasons = d.get("number_of_seasons", "?")
-            episodes = d.get("number_of_episodes", "?")
-            ep_runtime = d.get("episode_run_time", [])
-            extra = f"\n📅 *Сезонов:* {seasons} | *Серий:* {episodes}"
-            if ep_runtime: extra += f"\n⏱ *Длительность серии:* ~{ep_runtime[0]} мин"
+            s, e = d.get("number_of_seasons","?"), d.get("number_of_episodes","?")
+            er = d.get("episode_run_time",[])
+            extra = f"\n📅 *Сезонов: {s} | Серий: {e}*"
+            if er: extra += f"\n⏱ *Серия: ~{er[0]} мин*"
             text = f"📺 *{title}* ({year})\n\n⭐ *{rating:.1f}/10*\n🎭 {genres}{extra}\n\n📖 {overview[:500]}"
         if poster: await q.message.reply_photo(photo=f"https://image.tmdb.org/t/p/w500{poster}", caption=text, parse_mode=ParseMode.MARKDOWN)
         else: await q.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -658,7 +624,6 @@ async def flash_series(update, context, query=None):
     if any(w in query.lower() for w in BAD_WORDS): await update.message.reply_text(random.choice(SHAME_RESPONSES)); return
     await search_movie_tv(update, query, "tv")
 
-# ═══════════════ СОКРАЩЕНИЕ / ПЕРЕВОД / МЕМ ═══════════════
 async def flash_short(update, context, url=None):
     if not url: await update.message.reply_text("❗ `флеш сократить https://...`", parse_mode=ParseMode.MARKDOWN); return
     try:
@@ -702,27 +667,19 @@ async def flash_meme(update, context):
     except: pass
     await update.message.reply_text("😅 Мемы временно недоступны.")
 
-# ═══════════════ ОБРАБОТЧИК ТЕКСТА ═══════════════
+# ═══════════════ ОБРАБОТЧИК ═══════════════
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    
-    user_id = update.effective_user.id
-    
-    if user_id in anon_chat_pairs:
-        await anon_chat_message(update, context)
-        return
-    
-    uid, raw, text = user_id, update.message.text.strip(), update.message.text.lower().strip()
-    
-    if uid in pending_idea:
-        await flash_idea_receive(update, context)
-        return
+    uid = update.effective_user.id
+    if uid in anon_chat_pairs: await anon_chat_message(update, context); return
+    raw, text = update.message.text.strip(), update.message.text.lower().strip()
+    if uid in pending_idea: await flash_idea_receive(update, context); return
     
     if text == "🎲 ролл": await flash_roll(update, context); return
     elif text == "🪙 монетка": await flash_coin(update, context); return
     elif text == "⚡ флеш": await flash_help(update, context); return
     elif text == "🌤 погода": await update.message.reply_text("🌤 `флеш погода Город`", parse_mode=ParseMode.MARKDOWN); return
-    elif text == "🎵 музыка": await update.message.reply_text("🎵 `флеш музыка запрос`", parse_mode=ParseMode.MARKDOWN); return
+    elif text == "🎵 музыка": await update.message.reply_text("🎵 `флеш музыка название`", parse_mode=ParseMode.MARKDOWN); return
     elif text == "📧 почта (5 мин)": await flash_mail(update, context); return
     elif text == "💡 предложить": await flash_idea_start(update, context); return
     elif text == "😂 мем": await flash_meme(update, context); return
@@ -732,15 +689,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if url:
         if is_tg_url(url):
             try:
-                match = TG_PATTERN.search(url)
-                chat_id_str, message_id = match.groups()
-                chat_ids = []
-                if not chat_id_str.lstrip('-').isdigit(): chat_ids.append(f"@{chat_id_str}")
-                else:
-                    chat_ids.append(int(chat_id_str))
-                    if not chat_id_str.startswith("-100"): chat_ids.append(int(f"-100{chat_id_str}"))
-                for cid in chat_ids:
-                    try: await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=cid, message_id=int(message_id)); return
+                m = TG_PATTERN.search(url)
+                cid, mid = m.groups()
+                cids = [f"@{cid}"] if not cid.lstrip('-').isdigit() else [int(cid)] + ([int(f"-100{cid}")] if not cid.startswith("-100") else [])
+                for c in cids:
+                    try: await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=c, message_id=int(mid)); return
                     except: continue
             except: pass
         if is_supported_url(url): await download_video(update, context, url); return
@@ -748,8 +701,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith("флеш"): return
     parts = text.split(None, 2)
     if len(parts) == 1: await flash_help(update, context); return
-    cmd = parts[1] if len(parts) > 1 else ""
-    arg = parts[2].strip() if len(parts) > 2 else ""
+    cmd, arg = parts[1], parts[2].strip() if len(parts) > 2 else ""
     
     if cmd == "ролл": await flash_roll(update, context)
     elif cmd == "монетка": await flash_coin(update, context)
@@ -770,20 +722,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "тг":
         if arg:
             try:
-                match = TG_PATTERN.search(arg)
-                if match:
-                    chat_id_str, message_id = match.groups()
-                    chat_ids = []
-                    if not chat_id_str.lstrip('-').isdigit(): chat_ids.append(f"@{chat_id_str}")
-                    else:
-                        chat_ids.append(int(chat_id_str))
-                        if not chat_id_str.startswith("-100"): chat_ids.append(int(f"-100{chat_id_str}"))
-                    for cid in chat_ids:
-                        try: await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=cid, message_id=int(message_id)); return
+                m = TG_PATTERN.search(arg)
+                if m:
+                    cid, mid = m.groups()
+                    cids = [f"@{cid}"] if not cid.lstrip('-').isdigit() else [int(cid)] + ([int(f"-100{cid}")] if not cid.startswith("-100") else [])
+                    for c in cids:
+                        try: await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=c, message_id=int(mid)); return
                         except: continue
             except: pass
             await update.message.reply_text("❌ Не удалось.")
-        else: await update.message.reply_text("❗ `флеш тг https://t.me/...`", parse_mode=ParseMode.MARKDOWN)
+        else: await update.message.reply_text("❗ `флеш тг [ссылка]`", parse_mode=ParseMode.MARKDOWN)
     elif cmd in ("предложить", "идея"): await flash_idea_start(update, context)
     else: await flash_help(update, context)
 
@@ -803,9 +751,9 @@ def main():
     app.add_handler(CallbackQueryHandler(movie_info_callback, pattern="^movie_info:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    async def error_handler(update, context):
+    async def err(update, context):
         if "Conflict" in str(context.error): await asyncio.sleep(5)
-    app.add_error_handler(error_handler)
+    app.add_error_handler(err)
     logger.info("⚡ Flash Bot запущен!")
     
     webhook_url = os.environ.get("WEBHOOK_URL")
