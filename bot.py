@@ -39,24 +39,56 @@ try:
 except Exception as e:
     print(f"⚠️ pip upgrade failed: {e}")
 
-# Если ffmpeg не найден — ставим через apt (Railway поддерживает Debian)
 def _ensure_ffmpeg():
+    # Проверяем — может уже есть
+    for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
+        try:
+            r = subprocess.run([candidate, "-version"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                print(f"ffmpeg found: {candidate}")
+                return
+        except Exception:
+            pass
+
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+
+    # Обновляем списки пакетов
+    print("ffmpeg not found, trying apt-get update...")
     try:
-        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
-        if r.returncode == 0:
-            return
-    except Exception:
-        pass
-    print("ffmpeg not found, installing via apt...")
+        subprocess.run(["apt-get", "update", "-q"], check=True, timeout=120, env=env)
+    except Exception as e:
+        print(f"apt-get update failed: {e}")
+
+    # Пробуем установить
+    print("Installing ffmpeg via apt...")
     try:
         subprocess.run(
             ["apt-get", "install", "-y", "-q", "ffmpeg"],
-            check=True, timeout=180,
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+            check=True, timeout=300, env=env
         )
         print("ffmpeg installed via apt OK")
+        return
     except Exception as e:
         print(f"apt install ffmpeg failed: {e}")
+
+    # Запасной вариант — скачиваем статический бинарник ffmpeg
+    print("Trying static ffmpeg binary...")
+    try:
+        import urllib.request, stat
+        ffmpeg_url = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+        tar_path = "/tmp/ffmpeg.tar.xz"
+        urllib.request.urlretrieve(ffmpeg_url, tar_path)
+        subprocess.run(["tar", "-xf", tar_path, "-C", "/tmp/"], check=True, timeout=60)
+        # Ищем бинарник
+        for f in Path("/tmp").rglob("ffmpeg"):
+            if f.is_file():
+                dest = Path("/usr/local/bin/ffmpeg")
+                shutil.copy2(str(f), str(dest))
+                dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+                print(f"Static ffmpeg installed to {dest}")
+                return
+    except Exception as e:
+        print(f"Static ffmpeg install failed: {e}")
 
 _ensure_ffmpeg()
 
