@@ -1,8 +1,7 @@
-python-telegram-bot
-aiohttp
-aiofiles
+python-telegram-bot==20.7
+aiohttp==3.9.3
+aiofiles==23.2.1
 yt-dlp
-requests
-psutil
 SpeechRecognition
-ffmpeg
+psutil
+requests
