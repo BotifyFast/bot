@@ -27,6 +27,7 @@ if not TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не задан в переменных окружения!")
     sys.exit(1)
 
+# Установка зависимостей
 try:
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-q", "--upgrade",
@@ -36,66 +37,88 @@ try:
 except Exception as e:
     print(f"⚠️ pip upgrade failed: {e}")
 
+# ═══════════════ УСТАНОВКА FFMPEG (ИСПРАВЛЕНО) ═══════════════
 def _ensure_ffmpeg():
     import stat as stat_mod, urllib.request
 
-    for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/app/ffmpeg"]:
+    # Проверяем все возможные пути
+    search_paths = [
+        "ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", 
+        "/app/ffmpeg", "/tmp/ffmpeg"
+    ]
+    
+    for candidate in search_paths:
         try:
             r = subprocess.run([candidate, "-version"], capture_output=True, timeout=5)
             if r.returncode == 0:
-                print(f"ffmpeg OK: {candidate}")
+                print(f"✅ ffmpeg найден: {candidate}")
+                # Создаем симлинк на всякий случай
+                if candidate != "/usr/local/bin/ffmpeg":
+                    try:
+                        os.symlink(candidate, "/usr/local/bin/ffmpeg")
+                    except:
+                        pass
                 return
         except Exception:
             pass
 
-    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    print("🔄 Устанавливаю ffmpeg...")
+    
+    # Способ 1: Прямая установка через apt
     try:
-        subprocess.run(["apt-get", "update", "-qq"], timeout=60, env=env)
-        subprocess.run(["apt-get", "install", "-y", "-q", "ffmpeg"], check=True, timeout=180, env=env)
-        print("ffmpeg installed via apt")
-        return
-    except Exception:
-        pass
-
-    print("Downloading static ffmpeg binary...")
-    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    tar_path = "/tmp/ffmpeg_static.tar.xz"
-    dest_dir = "/tmp/ffmpeg_bin"
-    dest_bin = "/usr/local/bin/ffmpeg"
-
-    try:
-        urllib.request.urlretrieve(url, tar_path)
-        os.makedirs(dest_dir, exist_ok=True)
-        subprocess.run(["tar", "-xf", tar_path, "-C", dest_dir, "--strip-components=1"],
-                       check=True, timeout=120)
-        ffmpeg_src = os.path.join(dest_dir, "ffmpeg")
-        if os.path.exists(ffmpeg_src):
-            shutil.copy2(ffmpeg_src, dest_bin)
-            st = os.stat(dest_bin)
-            os.chmod(dest_bin, st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
-            print(f"Static ffmpeg installed: {dest_bin}")
+        env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+        subprocess.run(["apt-get", "update", "-qq"], timeout=60, env=env, capture_output=True)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], timeout=180, env=env, capture_output=True)
+        
+        # Проверяем установку
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            print("✅ ffmpeg установлен через apt")
             return
     except Exception as e:
-        print(f"johnvansickle download failed: {e}")
+        print(f"⚠️ apt install failed: {e}")
 
-    try:
-        url2 = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-        urllib.request.urlretrieve(url2, tar_path)
-        os.makedirs(dest_dir, exist_ok=True)
-        subprocess.run(["tar", "-xf", tar_path, "-C", dest_dir, "--strip-components=1"],
-                       check=True, timeout=120)
-        for root, dirs, files in os.walk(dest_dir):
-            if "ffmpeg" in files:
-                src = os.path.join(root, "ffmpeg")
-                shutil.copy2(src, dest_bin)
-                st = os.stat(dest_bin)
-                os.chmod(dest_bin, st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
-                print(f"yt-dlp ffmpeg installed: {dest_bin}")
-                return
-    except Exception as e:
-        print(f"yt-dlp ffmpeg download failed: {e}")
-
-    print("WARNING: ffmpeg could not be installed. Music/voice features won't work.")
+    # Способ 2: Статический бинарник
+    print("📦 Скачиваю статический ffmpeg...")
+    tar_path = "/tmp/ffmpeg.tar.xz"
+    dest_dir = "/tmp/ffmpeg_bin"
+    dest_bin = "/usr/local/bin/ffmpeg"
+    
+    urls = [
+        "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+        "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+    ]
+    
+    for url in urls:
+        try:
+            print(f"Пробую: {url}")
+            urllib.request.urlretrieve(url, tar_path)
+            os.makedirs(dest_dir, exist_ok=True)
+            
+            subprocess.run(["tar", "-xf", tar_path, "-C", dest_dir, "--strip-components=1"], 
+                         check=True, timeout=120, capture_output=True)
+            
+            # Ищем ffmpeg в распакованных файлах
+            for root, dirs, files in os.walk(dest_dir):
+                if "ffmpeg" in files:
+                    src = os.path.join(root, "ffmpeg")
+                    shutil.copy2(src, dest_bin)
+                    st = os.stat(dest_bin)
+                    os.chmod(dest_bin, st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
+                    
+                    # Также копируем ffprobe
+                    ffprobe_src = os.path.join(root, "ffprobe")
+                    if os.path.exists(ffprobe_src):
+                        shutil.copy2(ffprobe_src, "/usr/local/bin/ffprobe")
+                        os.chmod("/usr/local/bin/ffprobe", st.st_mode | stat_mod.S_IEXEC | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
+                    
+                    print(f"✅ ffmpeg установлен: {dest_bin}")
+                    return
+        except Exception as e:
+            print(f"⚠️ Ошибка с {url}: {e}")
+            continue
+    
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА: ffmpeg не удалось установить!")
 
 _ensure_ffmpeg()
 
@@ -120,6 +143,7 @@ active_timers = {}
 anon_chat_queue = []
 anon_chat_pairs = {}
 anon_chat_users = set()
+anon_waiting_users = set()  # Пользователи в режиме ожидания
 
 CITY_ALIASES = {
     "екб": "Екатеринбург", "спб": "Санкт-Петербург", "мск": "Москва",
@@ -154,23 +178,32 @@ def cleanup_temp():
     gc.collect()
 
 def get_ffmpeg_path():
+    """Ищет ffmpeg и ffprobe"""
     paths = [
-        "ffmpeg",
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/nix/var/nix/profiles/default/bin/ffmpeg",
+        "ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+        "/app/ffmpeg", "/tmp/ffmpeg"
     ]
     for p in paths:
         try:
             result = subprocess.run([p, "-version"], capture_output=True, timeout=5)
             if result.returncode == 0:
+                # Проверяем что ffprobe тоже доступен
+                ffprobe_path = p.replace("ffmpeg", "ffprobe")
+                try:
+                    subprocess.run([ffprobe_path, "-version"], capture_output=True, timeout=5)
+                except:
+                    # Если ffprobe нет, создаем симлинк
+                    try:
+                        os.symlink(p, ffprobe_path)
+                    except:
+                        pass
                 return p
         except:
             pass
     return None
 
 FFMPEG_PATH = get_ffmpeg_path()
-logger.info(f"ffmpeg path: {FFMPEG_PATH}")
+logger.info(f"FFmpeg path: {FFMPEG_PATH}")
 
 # ═══════════════ КЛАВИАТУРЫ ═══════════════
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -182,6 +215,13 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True, is_persistent=True
 )
 
+# Клавиатура для поиска собеседника
+WAITING_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("🚪 Выйти из поиска")]],
+    resize_keyboard=True
+)
+
+# Клавиатура для активного чата
 ANON_CHAT_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("➡️ Следующий"), KeyboardButton("🚪 Выйти")]],
     resize_keyboard=True
@@ -199,6 +239,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in anon_chat_pairs:
         await exit_anon_chat(user_id, context)
+    if user_id in anon_waiting_users:
+        anon_waiting_users.discard(user_id)
+        if user_id in anon_chat_queue:
+            anon_chat_queue.remove(user_id)
 
     text = (
         "⚡ *Привет! Я Flash Bot!*\n\n"
@@ -352,7 +396,7 @@ async def flash_weather(update, context, city=None):
         logger.error(f"Weather error: {e}")
         await msg.edit_text("❌ Ошибка.")
 
-# ═══════════════ ГОЛОС → ТЕКСТ (ИСПРАВЛЕНО) ═══════════════
+# ═══════════════ ГОЛОС → ТЕКСТ ═══════════════
 async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message:
@@ -376,15 +420,9 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         input_path = os.path.join(tmpdir, "input.oga")
         await file.download_to_drive(input_path)
 
-        # Проверяем размер файла
-        file_size = os.path.getsize(input_path)
-        if file_size == 0:
-            await status.edit_text("❌ Ошибка: файл пустой.")
-            return
-
-        # Пробуем OpenAI Whisper если есть ключ
+        # OpenAI Whisper
         if OPENAI_KEY:
-            await status.edit_text("🎙 Распознаю через Whisper (OpenAI)...")
+            await status.edit_text("🎙 Распознаю через Whisper...")
             try:
                 async with aiohttp.ClientSession() as s:
                     with open(input_path, "rb") as audio_file:
@@ -403,27 +441,17 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 text = result.get("text", "").strip()
                                 if text:
                                     await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
-                                else:
-                                    await status.edit_text("🎙 Не удалось распознать речь.")
-                                return
-                            else:
-                                err = await r.text()
-                                logger.error(f"Whisper API error {r.status}: {err}")
-            except Exception as e:
-                logger.error(f"Whisper error: {e}")
+                                    return
+            except:
+                pass
 
-        # Запасной вариант: Google Speech Recognition
+        # Google Speech Recognition
         if not FFMPEG_PATH:
-            await status.edit_text(
-                "❌ ffmpeg не найден на сервере.\n\n"
-                "Добавь в Railway nixpacks.toml:\n`[phases.setup]\nnixPkgs = [\"ffmpeg\"]`"
-            )
+            await status.edit_text("❌ ffmpeg не найден.")
             return
 
-        await status.edit_text("🎙 Конвертирую аудио в WAV...")
+        await status.edit_text("🎙 Конвертирую...")
         wav_path = os.path.join(tmpdir, "output.wav")
-        
-        # Конвертация через ffmpeg
         proc = await asyncio.create_subprocess_exec(
             FFMPEG_PATH, "-y", "-i", input_path,
             "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
@@ -431,17 +459,12 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
-        
-        if proc.returncode != 0:
-            logger.error(f"FFmpeg conversion failed: {stderr.decode()}")
-            await status.edit_text("❌ Ошибка конвертации аудио.")
-            return
 
         if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
-            await status.edit_text("❌ Ошибка: сконвертированный файл пустой.")
+            await status.edit_text("❌ Ошибка конвертации.")
             return
 
-        await status.edit_text("🎙 Распознаю речь через Google...")
+        await status.edit_text("🎙 Распознаю...")
         try:
             import speech_recognition as sr
             
@@ -450,7 +473,6 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with sr.AudioFile(wav_path) as source:
                     audio = recognizer.record(source)
                 try:
-                    # Пробуем Google с русским языком
                     return recognizer.recognize_google(audio, language="ru-RU")
                 except sr.UnknownValueError:
                     return None
@@ -464,29 +486,18 @@ async def flash_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if text:
                 await status.edit_text(f"🎙 *Расшифровка:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
             else:
-                await status.edit_text(
-                    "🎙 Не удалось распознать речь.\n"
-                    "Попробуй:\n"
-                    "• Говорить чётче и громче\n"
-                    "• Записать в тихом месте\n"
-                    "• Использовать текст вместо голосового"
-                )
+                await status.edit_text("🎙 Не удалось распознать речь.")
         except ImportError:
-            await status.edit_text(
-                "❌ Библиотека `SpeechRecognition` не установлена.\n"
-                "Добавь `SpeechRecognition` и `pydub` в requirements.txt\n"
-                "Или задай `OPENAI_API_KEY` для Whisper.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await status.edit_text("❌ SpeechRecognition не установлен.")
 
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await status.edit_text(f"❌ Ошибка распознавания: {str(e)[:100]}")
+        await status.edit_text("❌ Ошибка распознавания.")
     finally:
         if tmpdir and os.path.exists(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ═══════════════ МУЗЫКА (ИСПРАВЛЕНО ДЛЯ SOUNDCLOUD) ═══════════════
+# ═══════════════ МУЗЫКА (ИСПРАВЛЕНО - FFMPEG ОБЯЗАТЕЛЕН) ═══════════════
 async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
     if not query:
         await update.message.reply_text("🎵 Укажи название: `флеш музыка Imagine Dragons`", parse_mode=ParseMode.MARKDOWN)
@@ -494,10 +505,8 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     if not FFMPEG_PATH:
         await update.message.reply_text(
-            "❌ ffmpeg не найден. Музыка недоступна.\n\n"
-            "Добавь в корень проекта файл `nixpacks.toml`:\n"
-            "```\n[phases.setup]\nnixPkgs = [\"ffmpeg\"]\n```",
-            parse_mode=ParseMode.MARKDOWN
+            "❌ ffmpeg не найден. Музыка недоступна.\n"
+            "Установи ffmpeg: `apt-get install ffmpeg`"
         )
         return
 
@@ -512,15 +521,12 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 "no_warnings": True,
                 "extract_flat": "in_playlist",
                 "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Referer": "https://soundcloud.com/",
-                    "Origin": "https://soundcloud.com"
                 }
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(f"scsearch10:{query}", download=False)
+                return ydl.extract_info(f"scsearch5:{query}", download=False)
 
         def search_yt():
             opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist"}
@@ -529,20 +535,22 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         loop = asyncio.get_event_loop()
 
-        # Пробуем SoundCloud
-        source = "SoundCloud"
+        source = "YouTube"  # По умолчанию YouTube надежнее
         info = None
+        
+        # Сначала пробуем YouTube (он стабильнее)
         try:
-            info = await asyncio.wait_for(loop.run_in_executor(None, search_sc), timeout=25)
+            info = await asyncio.wait_for(loop.run_in_executor(None, search_yt), timeout=20)
             if not (info and info.get("entries")):
-                raise ValueError("no SoundCloud results")
+                raise ValueError("no YouTube results")
         except Exception as e:
-            logger.warning(f"SoundCloud search failed: {e}")
-            source = "YouTube"
+            logger.warning(f"YouTube search failed: {e}")
+            # Если YouTube не сработал, пробуем SoundCloud
+            source = "SoundCloud"
             try:
-                info = await asyncio.wait_for(loop.run_in_executor(None, search_yt), timeout=20)
+                info = await asyncio.wait_for(loop.run_in_executor(None, search_sc), timeout=20)
             except Exception as e2:
-                logger.error(f"YouTube search also failed: {e2}")
+                logger.error(f"SoundCloud search also failed: {e2}")
                 info = None
 
         entries = [e for e in (info.get("entries", []) if info else []) if e]
@@ -554,7 +562,7 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         uid = update.effective_user.id
         results = []
         buttons = []
-        src_icon = "🔊" if source == "SoundCloud" else "▶️"
+        src_icon = "▶️" if source == "YouTube" else "🔊"
 
         for i, entry in enumerate(entries[:5]):
             title = entry.get("title") or f"Трек {i+1}"
@@ -597,14 +605,11 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
     source = track.get("source", "")
 
     if not FFMPEG_PATH:
-        await q.message.edit_text(
-            "❌ ffmpeg не найден. Без него конвертация невозможна.\n"
-            "Добавь `nixpacks.toml` с ffmpeg в Railway."
-        )
+        await q.message.edit_text("❌ ffmpeg не найден. Установи ffmpeg на сервер.")
         return
 
     await q.message.edit_text(
-        f"⬇️ Скачиваю с *{source}*:\n*{track['title'][:50]}*",
+        f"⬇️ Скачиваю *{track['title'][:50]}*...",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -618,29 +623,17 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "ffmpeg_location": FFMPEG_PATH,
+            "ffmpeg_location": FFMPEG_PATH,  # Важно!
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "192"
             }],
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
             "max_filesize": 48 * 1024 * 1024,
         }
-
-        # Для SoundCloud добавляем специальные параметры
-        if source == "SoundCloud":
-            ydl_opts["http_headers"]["Referer"] = "https://soundcloud.com/"
-            ydl_opts["http_headers"]["Origin"] = "https://soundcloud.com"
-            ydl_opts["extractor_args"] = {
-                "soundcloud": {
-                    "client_id": "iZIs9mchVcX5lhVRyQGGAYlNPVldzAoX"
-                }
-            }
 
         def dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -651,41 +644,43 @@ async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_
             timeout=120
         )
 
-        files = list(Path(tmpdir).glob("*.mp3"))
-        if not files:
-            files = [
-                f for f in Path(tmpdir).iterdir()
-                if f.suffix.lower() in (".mp3", ".m4a", ".opus", ".ogg", ".webm")
-            ]
+        # Ищем mp3 файлы
+        files = []
+        for f in Path(tmpdir).iterdir():
+            if f.suffix.lower() in [".mp3", ".m4a", ".opus", ".ogg", ".webm"]:
+                files.append(f)
 
         if not files:
             raise FileNotFoundError("Файл не найден после скачивания")
 
-        file_size = files[0].stat().st_size
+        file_path = files[0]
+        file_size = file_path.stat().st_size
+        
         if file_size > 50 * 1024 * 1024:
             await q.message.edit_text("⚠️ Файл > 50 МБ, Telegram не примет.")
             return
+            
         if file_size == 0:
             await q.message.edit_text("❌ Ошибка: скачанный файл пустой.")
             return
 
         await q.message.edit_text("📤 Отправляю...")
-        async with aiofiles.open(files[0], "rb") as f:
+        async with aiofiles.open(file_path, "rb") as f:
             data = await f.read()
 
         await q.message.reply_audio(
             audio=data,
             title=track["title"],
-            duration=track.get("duration", 0),
-            performer=source
+            duration=track.get("duration", 0)
         )
         await q.message.delete()
 
     except asyncio.TimeoutError:
-        await q.message.edit_text("❌ Скачивание слишком долгое. Попробуй другой трек.")
+        await q.message.edit_text("❌ Скачивание слишком долгое.")
     except Exception as e:
         logger.error(f"Music DL error: {e}")
-        await q.message.edit_text(f"❌ Не удалось скачать трек. {str(e)[:50]}")
+        error_msg = str(e)[:100]
+        await q.message.edit_text(f"❌ Ошибка скачивания: {error_msg}")
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -738,6 +733,188 @@ async def guerrilla_callback(update, context):
         except:
             await q.answer("❌ Ошибка.", show_alert=True)
 
+# ═══════════════ АНОНИМНЫЙ ЧАТ (ИСПРАВЛЕНО) ═══════════════
+async def exit_anon_chat(user_id, context, silent=False):
+    """Выход из анонимного чата"""
+    # Если пользователь в паре - разрываем пару
+    if user_id in anon_chat_pairs:
+        partner_id = anon_chat_pairs[user_id]
+        del anon_chat_pairs[user_id]
+        if partner_id in anon_chat_pairs:
+            del anon_chat_pairs[partner_id]
+        
+        anon_chat_users.discard(user_id)
+        anon_chat_users.discard(partner_id)
+        
+        # Отправляем уведомление партнеру
+        if not silent:
+            try:
+                await context.bot.send_message(
+                    partner_id,
+                    "👋 Собеседник покинул чат.",
+                    reply_markup=MAIN_KEYBOARD
+                )
+            except:
+                pass
+    
+    # Убираем из очереди ожидания
+    if user_id in anon_chat_queue:
+        anon_chat_queue.remove(user_id)
+    
+    # Убираем из ожидающих
+    anon_waiting_users.discard(user_id)
+    anon_chat_users.discard(user_id)
+    
+    # Возвращаем главную клавиатуру
+    try:
+        await context.bot.send_message(
+            user_id,
+            "👋 Ты вышел из поиска/чата.",
+            reply_markup=MAIN_KEYBOARD
+        )
+    except:
+        pass
+
+async def find_new_partner(user_id, context):
+    """Поиск нового собеседника"""
+    await exit_anon_chat(user_id, context, silent=True)
+    
+    # Проверяем очередь
+    available_partners = [u for u in anon_chat_queue if u != user_id and u not in anon_chat_pairs]
+    
+    if available_partners:
+        # Нашли собеседника
+        partner_id = available_partners[0]
+        anon_chat_queue.remove(partner_id)
+        
+        anon_chat_pairs[user_id] = partner_id
+        anon_chat_pairs[partner_id] = user_id
+        anon_chat_users.add(user_id)
+        anon_chat_users.add(partner_id)
+        anon_waiting_users.discard(partner_id)
+        
+        await context.bot.send_message(
+            user_id, 
+            "💬 *Собеседник найден!* Общайтесь!\n\n"
+            "Кнопки внизу для управления.",
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=ANON_CHAT_KEYBOARD
+        )
+        await context.bot.send_message(
+            partner_id, 
+            "💬 *Собеседник найден!* Общайтесь!\n\n"
+            "Кнопки внизу для управления.",
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=ANON_CHAT_KEYBOARD
+        )
+    else:
+        # Встаем в очередь
+        anon_chat_queue.append(user_id)
+        anon_waiting_users.add(user_id)
+        anon_chat_users.add(user_id)
+        
+        await context.bot.send_message(
+            user_id,
+            f"⏳ *Ищу собеседника...*\n\n"
+            f"В очереди: {len(anon_chat_queue)} чел.\n"
+            f"Нажмите кнопку для выхода.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=WAITING_KEYBOARD
+        )
+
+async def flash_anon_chat_start(update, context):
+    """Начало анонимного чата"""
+    if not is_private(update):
+        await update.message.reply_text("💬 Анонимный чат работает только в личке.")
+        return
+    
+    uid = update.effective_user.id
+    
+    # Если уже в чате
+    if uid in anon_chat_pairs:
+        await update.message.reply_text(
+            "💬 Ты уже в чате!", 
+            reply_markup=ANON_CHAT_KEYBOARD
+        )
+        return
+    
+    # Если в режиме ожидания
+    if uid in anon_waiting_users:
+        await update.message.reply_text(
+            "⏳ Ты уже в поиске!",
+            reply_markup=WAITING_KEYBOARD
+        )
+        return
+    
+    await find_new_partner(uid, context)
+
+async def flash_anon_chat_stop(update, context):
+    """Выход из чата/поиска"""
+    uid = update.effective_user.id
+    await exit_anon_chat(uid, context)
+
+async def anon_chat_next(update, context):
+    """Переход к следующему собеседнику"""
+    uid = update.effective_user.id
+    
+    if uid in anon_chat_pairs:
+        partner_id = anon_chat_pairs[uid]
+        
+        # Сообщаем партнеру
+        try:
+            await context.bot.send_message(
+                partner_id,
+                "👋 Собеседник перешёл к следующему.",
+                reply_markup=MAIN_KEYBOARD
+            )
+        except:
+            pass
+        
+        # Разрываем текущую пару
+        del anon_chat_pairs[uid]
+        if partner_id in anon_chat_pairs:
+            del anon_chat_pairs[partner_id]
+        anon_chat_users.discard(uid)
+        anon_chat_users.discard(partner_id)
+    
+    # Ищем нового
+    await find_new_partner(uid, context)
+
+async def anon_chat_message(update, context):
+    """Пересылка сообщений в анонимном чате"""
+    if not update.message or not update.message.text:
+        return
+    
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # Обработка кнопок
+    if text == "🚪 Выйти из поиска":
+        await flash_anon_chat_stop(update, context)
+        return
+    elif text == "➡️ Следующий":
+        await anon_chat_next(update, context)
+        return
+    elif text == "🚪 Выйти":
+        await flash_anon_chat_stop(update, context)
+        return
+    
+    # Отправка сообщения
+    if uid in anon_chat_pairs:
+        partner_id = anon_chat_pairs[uid]
+        try:
+            await context.bot.send_message(
+                partner_id, 
+                f"💬 {text}",
+                reply_markup=ANON_CHAT_KEYBOARD
+            )
+        except Exception as e:
+            logger.error(f"Chat send error: {e}")
+            await update.message.reply_text(
+                "❌ Не удалось отправить сообщение.",
+                reply_markup=ANON_CHAT_KEYBOARD
+            )
+
 # ═══════════════ ПРЕДЛОЖЕНИЯ ═══════════════
 async def flash_idea_start(update, context):
     pending_idea.add(update.effective_user.id)
@@ -762,10 +939,7 @@ async def flash_idea_receive(update, context):
 # ═══════════════ СКАЧАТЬ ВИДЕО ═══════════════
 async def download_video(update, context, url):
     if not FFMPEG_PATH:
-        await update.message.reply_text(
-            "❌ ffmpeg не найден. Скачивание видео недоступно.\n"
-            "Добавь `nixpacks.toml` в проект."
-        )
+        await update.message.reply_text("❌ ffmpeg не найден.")
         return
 
     msg = await update.message.reply_text("⬇️ Скачиваю видео...")
@@ -781,16 +955,10 @@ async def download_video(update, context, url):
             "merge_output_format": "mp4",
             "max_filesize": 48 * 1024 * 1024,
             "ffmpeg_location": FFMPEG_PATH,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            "http_headers": {"User-Agent": "Mozilla/5.0"},
         }
         if is_sc:
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-            opts["http_headers"]["Referer"] = "https://soundcloud.com/"
-            opts["http_headers"]["Origin"] = "https://soundcloud.com"
 
         def dl():
             with yt_dlp.YoutubeDL(opts) as y:
@@ -830,99 +998,13 @@ async def download_video(update, context, url):
         await msg.edit_text("❌ Скачивание слишком долгое.")
     except Exception as e:
         logger.error(f"Video DL error: {e}")
-        await msg.edit_text("❌ Не удалось скачать. Возможно, видео недоступно или слишком большое.")
+        await msg.edit_text("❌ Не удалось скачать.")
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
         gc.collect()
 
-# ═══════════════ АНОНИМНЫЙ ЧАТ ═══════════════
-async def exit_anon_chat(user_id, context):
-    if user_id in anon_chat_pairs:
-        partner_id = anon_chat_pairs[user_id]
-        del anon_chat_pairs[user_id]
-        if partner_id in anon_chat_pairs:
-            del anon_chat_pairs[partner_id]
-        anon_chat_users.discard(user_id)
-        anon_chat_users.discard(partner_id)
-        try:
-            await context.bot.send_message(
-                partner_id,
-                "👋 Собеседник покинул чат.\nНапиши `флеш чат` чтобы найти нового!",
-                reply_markup=MAIN_KEYBOARD
-            )
-        except:
-            pass
-    if user_id in anon_chat_queue:
-        anon_chat_queue.remove(user_id)
-    anon_chat_users.discard(user_id)
-
-async def find_new_partner(user_id, context):
-    await exit_anon_chat(user_id, context)
-    if anon_chat_queue:
-        pid = anon_chat_queue.pop(0)
-        anon_chat_pairs[user_id] = pid
-        anon_chat_pairs[pid] = user_id
-        anon_chat_users.add(user_id)
-        anon_chat_users.add(pid)
-        await context.bot.send_message(user_id, "💬 *Собеседник найден!* Начинайте общаться.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
-        await context.bot.send_message(pid, "💬 *Собеседник найден!* Начинайте общаться.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
-    else:
-        anon_chat_queue.append(user_id)
-        anon_chat_users.add(user_id)
-        await context.bot.send_message(user_id, "⏳ *Ищу собеседника...*\nПодожди немного.", parse_mode=ParseMode.MARKDOWN, reply_markup=ANON_CHAT_KEYBOARD)
-
-async def flash_anon_chat_start(update, context):
-    if not is_private(update):
-        await update.message.reply_text("💬 Анонимный чат работает только в личке.")
-        return
-    uid = update.effective_user.id
-    if uid in anon_chat_pairs:
-        await update.message.reply_text("💬 Ты уже в чате!", reply_markup=ANON_CHAT_KEYBOARD)
-        return
-    await find_new_partner(uid, context)
-
-async def flash_anon_chat_stop(update, context):
-    uid = update.effective_user.id
-    await exit_anon_chat(uid, context)
-    await update.message.reply_text("👋 Вышел из анонимного чата.", reply_markup=MAIN_KEYBOARD)
-
-async def anon_chat_next(update, context):
-    uid = update.effective_user.id
-    if uid in anon_chat_pairs:
-        pid = anon_chat_pairs[uid]
-        try:
-            await context.bot.send_message(pid, "👋 Собеседник перешёл к следующему.", reply_markup=ANON_CHAT_KEYBOARD)
-        except:
-            pass
-        del anon_chat_pairs[uid]
-        if pid in anon_chat_pairs:
-            del anon_chat_pairs[pid]
-        anon_chat_users.discard(uid)
-        anon_chat_users.discard(pid)
-    await find_new_partner(uid, context)
-
-async def anon_chat_message(update, context):
-    if not update.message or not update.message.text:
-        return
-    uid = update.effective_user.id
-    if uid not in anon_chat_pairs:
-        return
-    text = update.message.text.strip()
-    if text == "➡️ Следующий":
-        await anon_chat_next(update, context)
-        return
-    elif text in ("🚪 Выйти", "стоп", "/stop_chat"):
-        await flash_anon_chat_stop(update, context)
-        return
-    pid = anon_chat_pairs[uid]
-    try:
-        await context.bot.send_message(pid, f"💬 *Аноним:* {text}", parse_mode=ParseMode.MARKDOWN)
-    except:
-        await update.message.reply_text("❌ Собеседник отключился.", reply_markup=ANON_CHAT_KEYBOARD)
-        await exit_anon_chat(uid, context)
-
-# ═══════════════ КУРС ВАЛЮТ ═══════════════
+# ═══════════════ ОСТАЛЬНЫЕ ФУНКЦИИ ═══════════════
 async def flash_rate(update, context):
     try:
         async with aiohttp.ClientSession() as s:
@@ -941,7 +1023,6 @@ async def flash_rate(update, context):
     except:
         await update.message.reply_text("❌ Ошибка получения курса.")
 
-# ═══════════════ ПОИСК ФИЛЬМОВ ═══════════════
 async def search_movie_tv(update, query, media_type):
     msg = await update.message.reply_text("🔍 Ищу...")
     try:
@@ -1085,16 +1166,6 @@ async def flash_meme(update, context):
                     return
     except:
         pass
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get("https://api.imgflip.com/get_memes") as r:
-                memes = (await r.json()).get("data", {}).get("memes", [])
-                if memes:
-                    m = random.choice(memes)
-                    await update.message.reply_photo(photo=m["url"], caption=f"😂 {m['name']}")
-                    return
-    except:
-        pass
     await update.message.reply_text("😅 Мемы временно недоступны.")
 
 # ═══════════════ ОБРАБОТЧИК ТЕКСТА ═══════════════
@@ -1103,17 +1174,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     uid = update.effective_user.id
 
-    if uid in anon_chat_pairs:
+    # Приоритет: анонимный чат
+    if uid in anon_chat_pairs or uid in anon_waiting_users:
         await anon_chat_message(update, context)
         return
 
     raw = update.message.text.strip()
     text = raw.lower().strip()
 
+    # Режим ожидания идеи
     if uid in pending_idea:
         await flash_idea_receive(update, context)
         return
 
+    # Кнопки клавиатуры
     btn_map = {
         "🎲 ролл":           flash_roll,
         "🪙 монетка":        flash_coin,
@@ -1137,6 +1211,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await flash_idea_start(update, context)
         return
 
+    # Ссылки
     url = extract_url(raw)
     if url:
         if is_tg_url(url):
@@ -1162,6 +1237,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await download_video(update, context, url)
             return
 
+    # Команды "флеш ..."
     if not text.startswith("флеш"):
         return
     parts = text.split(None, 2)
