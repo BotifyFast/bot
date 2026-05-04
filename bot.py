@@ -12,8 +12,23 @@ import subprocess
 import sys
 import signal
 import gc
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+# ═══════════════ ГЛОБАЛЬНЫЕ НАСТРОЙКИ ═══════════════
+# Вставляй СЮДА:
+FFMPEG_PATH = shutil.which("ffmpeg") 
+
+# Можно добавить проверку в консоль, чтобы ты видел в логах Railway, нашелся ли он:
+if FFMPEG_PATH:
+    print(f"✅ FFmpeg найден по адресу: {FFMPEG_PATH}")
+else:
+    print("❌ FFmpeg НЕ НАЙДЕН! Проверь nixpacks.toml")
+
+# ═══════════════ ДАЛЕЕ ТВОИ ФУНКЦИИ ═══════════════
+
+async def start(update, context):
+    # ... твой код ...
 
 # ═══════════════ КОНФИГ ═══════════════
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
@@ -477,10 +492,11 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text("🎵 Укажи название: `флеш музыка Imagine Dragons`", parse_mode=ParseMode.MARKDOWN)
         return
 
-    if not FFMPEG_PATH:
+    # Если вдруг ffmpeg реально не установлен в системе
+    if not shutil.which("ffmpeg"):
         await update.message.reply_text(
-            "❌ ffmpeg не найден. Музыка недоступна.\n\n"
-            "Добавь в корень проекта файл `nixpacks.toml`:\n"
+            "❌ ffmpeg не найден в системе.\n\n"
+            "Проверь, что в `nixpacks.toml` добавлено:\n"
             "```\n[phases.setup]\nnixPkgs = [\"ffmpeg\"]\n```",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -495,7 +511,7 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
             opts = {
                 "quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
                 "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
                     "Referer": "https://soundcloud.com/"
                 }
             }
@@ -508,17 +524,18 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 return ydl.extract_info(f"ytsearch5:{query}", download=False)
 
         loop = asyncio.get_event_loop()
-
         source = "SoundCloud"
         info = None
+        
         try:
-            info = await asyncio.wait_for(loop.run_in_executor(None, search_sc), timeout=20)
+            info = await asyncio.wait_for(loop.run_in_executor(None, search_sc), timeout=25)
             if not (info and info.get("entries")):
                 raise ValueError("no results")
-        except Exception:
+        except Exception as e:
+            logger.info(f"SC search failed, trying YT: {e}")
             source = "YouTube"
             try:
-                info = await asyncio.wait_for(loop.run_in_executor(None, search_yt), timeout=20)
+                info = await asyncio.wait_for(loop.run_in_executor(None, search_yt), timeout=25)
             except Exception:
                 info = None
 
@@ -539,9 +556,10 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
             duration = int(entry.get("duration") or 0)
             mins, secs = divmod(duration, 60) if duration > 0 else (0, 0)
             dur_str = f"{mins}:{secs:02d}" if duration > 0 else "??:??"
+            
             results.append({"title": title, "url": url, "duration": duration, "source": source})
             buttons.append([InlineKeyboardButton(
-                f"{src_icon} {i+1}. {title[:40]} [{dur_str}]",
+                f"{src_icon} {i+1}. {title[:35]} [{dur_str}]",
                 callback_data=f"dl_music:{uid}:{i}"
             )])
 
@@ -554,104 +572,77 @@ async def flash_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     except Exception as e:
         logger.error(f"Music search error: {e}")
-        await msg.edit_text("❌ Ошибка поиска.")
+        await msg.edit_text("❌ Ошибка поиска. Попробуй другой запрос.")
 
 async def download_music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    if not q.data.startswith("dl_music:"):
-        return
+    if not q.data.startswith("dl_music:"): return
     _, uid_str, idx_str = q.data.split(":")
     uid, idx = int(uid_str), int(idx_str)
 
     tracks = pending_music.get(uid, [])
-    if idx >= len(tracks):
+    if not tracks or idx >= len(tracks):
         await q.message.edit_text("❌ Сессия устарела. Ищи снова.")
         return
 
     track = tracks[idx]
     source = track.get("source", "")
-
-    if not FFMPEG_PATH:
-        await q.message.edit_text(
-            "❌ ffmpeg не найден. Без него конвертация невозможна.\n"
-            "Добавь `nixpacks.toml` с ffmpeg в Railway."
-        )
-        return
+    current_ffmpeg = shutil.which("ffmpeg")
 
     await q.message.edit_text(
         f"⬇️ Скачиваю с *{source}*:\n*{track['title'][:50]}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
-    tmpdir = None
+    tmpdir = tempfile.mkdtemp()
     try:
-        tmpdir = tempfile.mkdtemp()
         import yt_dlp
-
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "ffmpeg_location": FFMPEG_PATH,   # ← явно указываем путь к ffmpeg
+            "ffmpeg_location": current_ffmpeg, # Юзаем найденный путь
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "192"
             }],
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://soundcloud.com/" if source == "SoundCloud" else "https://www.youtube.com/",
-            },
-            "max_filesize": 48 * 1024 * 1024,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0 Safari/537.36",
+            }
         }
 
         def dl():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([track["url"]])
 
-        await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, dl),
-            timeout=120
-        )
+        await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, dl), timeout=180)
 
         files = list(Path(tmpdir).glob("*.mp3"))
         if not files:
-            files = [
-                f for f in Path(tmpdir).iterdir()
-                if f.suffix.lower() in (".mp3", ".m4a", ".opus", ".ogg", ".webm")
-            ]
+            files = [f for f in Path(tmpdir).iterdir() if f.is_file()]
 
         if not files:
-            raise FileNotFoundError("Файл не найден после скачивания")
-
-        if files[0].stat().st_size > 50 * 1024 * 1024:
-            await q.message.edit_text("⚠️ Файл > 50 МБ, Telegram не примет.")
-            return
+            raise FileNotFoundError("Файл не найден")
 
         await q.message.edit_text("📤 Отправляю...")
-        async with aiofiles.open(files[0], "rb") as f:
-            data = await f.read()
-
+        
+        # Отправляем напрямую из файла, чтобы не забивать оперативку
         await q.message.reply_audio(
-            audio=data,
+            audio=open(files[0], "rb"),
             title=track["title"],
-            duration=track["duration"]
+            duration=track.get("duration")
         )
         await q.message.delete()
 
-    except asyncio.TimeoutError:
-        await q.message.edit_text("❌ Скачивание слишком долгое. Попробуй другой трек.")
     except Exception as e:
         logger.error(f"Music DL error: {e}")
-        await q.message.edit_text("❌ Не удалось скачать трек. Попробуй другой.")
+        await q.message.edit_text(f"❌ Ошибка: {str(e)[:100]}")
     finally:
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        gc.collect()
-
+        shutil.rmtree(tmpdir, ignore_errors=True)
 # ═══════════════ ВРЕМЕННАЯ ПОЧТА ═══════════════
 async def flash_mail(update, context):
     if not is_private(update):
